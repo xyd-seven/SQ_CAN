@@ -1,0 +1,68 @@
+# Qt / qmake build output
+Makefile
+Makefile.*
+*.o
+*.obj
+*.moc
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.ilk
+*.pdb
+*.idb
+
+# Qt Creator user/session files
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qbs.user.*
+*.autosave
+
+# Build directories
+build/
+debug/
+release/
+Debug/
+Release/
+*/build/
+*/debug/
+*/release/
+*/Debug/
+*/Release/
+
+# Generated binaries
+*.exe
+*.dll
+*.lib
+*.a
+
+# Runtime logs and captured data
+*.log
+*.csv
+*.bin
+can_log_*.txt
+imu_parsed_*.csv
+ins_log_*.txt
+serial_log_*.txt
+*_decoded.csv
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+~$*
+Thumbs.db
+desktop.ini
+
+# Local IDE/cache directories
+.vs/
+.vscode/
+.idea/
+.qtc_clangd/
+
+# Keep source-controlled resources explicit if needed
+!qt-example_32/CAN/icons/*.png
+!qt-example_32/CAN/icons/*.ico
+!qt-example_32/CAN/*.dll
