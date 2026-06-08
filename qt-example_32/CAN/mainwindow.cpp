@@ -741,12 +741,37 @@ void MainWindow::on_sendBtn_clicked()
 
 void MainWindow::AddDataToList(QStringList strList)
 {
+    // 实时保存必须独立于界面刷新状态：
+    // 用户滚动表格查看历史数据或关闭“实时显示”时，日志仍然需要完整记录。
+    if (m_canFile.isOpen() && strList.count() >= 9) {
+        QString logLine = QString("[%1] [通道%2] [%3] ID:%4 %5 帧类型:%6 DLC:%7 协议:%8 数据:%9\n")
+                          .arg(strList.at(0))
+                          .arg(strList.at(1))
+                          .arg(strList.at(2))
+                          .arg(strList.at(3))
+                          .arg(strList.at(4))
+                          .arg(strList.at(5))
+                          .arg(strList.at(6))
+                          .arg(strList.at(7))
+                          .arg(strList.at(8));
+        m_canStream << logLine;
+    }
+
     if (ui->checkBox_4->isChecked()) {
+        const int maxDisplayRows = 1000;
+        const int bottomThreshold = 2;
+
         // 智能滚动判定：在插入数据前，获取并判断当前滚动条位置
         QScrollBar *vBar = ui->tableWidget->verticalScrollBar();
         bool autoScroll = true;
         if (vBar) {
-            autoScroll = (vBar->value() >= vBar->maximum() - 2);
+            autoScroll = (vBar->value() >= vBar->maximum() - bottomThreshold);
+        }
+
+        // 用户离开底部时冻结表格显示，便于查看历史数据；
+        // CAN 接收解析和文件保存仍在上面继续执行。
+        if (!autoScroll) {
+            return;
         }
 
         // 性能优化 1：暂时禁用界面刷新更新，防止写入每个单元格都触发重绘
@@ -759,10 +784,10 @@ void MainWindow::AddDataToList(QStringList strList)
         int currentRowCount = ui->tableWidget->rowCount();
         int targetRow = currentRowCount;
 
-        // 性能优化 2：若表满 100 行，则先删首行再直接填入第 99 行，规避内存对象多次移动
-        if (currentRowCount >= 100) {
+        // 性能优化 2：若表满 maxDisplayRows 行，则先删首行再复用尾部位置，规避表格无限增长。
+        if (currentRowCount >= maxDisplayRows) {
             ui->tableWidget->removeRow(0);
-            targetRow = 99;
+            targetRow = maxDisplayRows - 1;
         }
 
         // 在尾部插入新空行
@@ -788,20 +813,6 @@ void MainWindow::AddDataToList(QStringList strList)
         }
     }
 
-    // 实时保存数据到本地文件 (强制使用 TXT 格式)
-    if (m_canFile.isOpen() && strList.count() >= 9) {
-        QString logLine = QString("[%1] [通道%2] [%3] ID:%4 %5 帧类型:%6 DLC:%7 协议:%8 数据:%9\n")
-                          .arg(strList.at(0))
-                          .arg(strList.at(1))
-                          .arg(strList.at(2))
-                          .arg(strList.at(3))
-                          .arg(strList.at(4))
-                          .arg(strList.at(5))
-                          .arg(strList.at(6))
-                          .arg(strList.at(7))
-                          .arg(strList.at(8));
-        m_canStream << logLine;
-    }
 }
 
 // 静故障数结构
@@ -1623,7 +1634,11 @@ void MainWindow::setupRawTab()
     rawCmbOutBaud->addItem("230400", 3);
     rawCmbOutBaud->addItem("460800", 4);
     rawCmbOutBaud->addItem("921600", 5);
-    rawCmbOutBaud->setCurrentIndex(4); // 115200
+    const int defaultRawOutBaudValue = 4; // 协议值 4 对应 460800
+    int baudIndex = rawCmbOutBaud->findData(defaultRawOutBaudValue);
+    if (baudIndex >= 0) {
+        rawCmbOutBaud->setCurrentIndex(baudIndex);
+    }
     rawCmbOutBaud->setStyleSheet("QComboBox { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 3px; }");
 
     QLabel *lblOutPeriod = new QLabel(QString::fromUtf8("输出周期:"), boxRawCmd); lblOutPeriod->setStyleSheet(labelStyle);
@@ -2393,7 +2408,7 @@ void MainWindow::setupSerialTab()
     lblBaud->setStyleSheet("color: #eceff4;");
     serialBaudCombo = new QComboBox(boxConn);
     serialBaudCombo->addItems(QStringList() << "9600" << "19200" << "38400" << "57600" << "115200" << "230400" << "460800" << "921600");
-    serialBaudCombo->setCurrentIndex(4); // 默认 115200
+    serialBaudCombo->setCurrentIndex(6); // 默认 460800
     serialBaudCombo->setFixedWidth(150);
     serialBaudCombo->setStyleSheet("QComboBox { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 4px; }");
 

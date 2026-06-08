@@ -39,8 +39,11 @@ void IMUParser::parseCANFrame(unsigned int id, const unsigned char* data, unsign
         QMutexLocker rawLocker(&m_rawDataMutex);
         
         // 收到已存在于掩码中的 ID 时，认为上一包数据已经结束，重置接收掩码，作为新包的起始点
-        if (m_rawReceivedMask & (1 << (id - 1))) {
+        if (id == 0x01) {
             m_rawReceivedMask = 0;
+            memset(m_rawBuffer, 0, 96);
+        } else if (m_rawReceivedMask == 0) {
+            return;
         }
         
         int offset = (id - 1) * 8;
