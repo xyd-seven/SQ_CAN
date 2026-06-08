@@ -238,35 +238,47 @@ void CANThread::run()
         frameCount = ZCAN_GetReceiveNum(m_channel1, TYPE_CAN);
         if(frameCount > 0)
         {
-            frameCount = ZCAN_Receive(m_channel1,recvCANData,(frameCount > 200 ? 200 : frameCount),50);
-            QVector<ZCAN_Receive_Data> vec(frameCount);
-            memcpy(vec.data(), recvCANData, frameCount * sizeof(ZCAN_Receive_Data));
-            recvedCANData(vec,frameCount,0); //触发信号
+            int actualRead = ZCAN_Receive(m_channel1,recvCANData,(frameCount > 200 ? 200 : frameCount),50);
+            if (actualRead > 0)
+            {
+                QVector<ZCAN_Receive_Data> vec(actualRead);
+                memcpy(vec.data(), recvCANData, actualRead * sizeof(ZCAN_Receive_Data));
+                emit recvedCANData(vec,actualRead,0); //触发信号
+            }
         }
         frameCount = ZCAN_GetReceiveNum(m_channel1, TYPE_CANFD);
         if(frameCount > 0)
         {
-            frameCount = ZCAN_ReceiveFD(m_channel1,recvCANFDData,(frameCount > 200 ? 200 : frameCount),50);
-            QVector<ZCAN_ReceiveFD_Data> vec(frameCount);
-            memcpy(vec.data(), recvCANFDData, frameCount * sizeof(ZCAN_ReceiveFD_Data));
-            recvedCANFDData(vec,frameCount,0);
+            int actualRead = ZCAN_ReceiveFD(m_channel1,recvCANFDData,(frameCount > 200 ? 200 : frameCount),50);
+            if (actualRead > 0)
+            {
+                QVector<ZCAN_ReceiveFD_Data> vec(actualRead);
+                memcpy(vec.data(), recvCANFDData, actualRead * sizeof(ZCAN_ReceiveFD_Data));
+                emit recvedCANFDData(vec,actualRead,0);
+            }
         }
         //CAN2
         frameCount = ZCAN_GetReceiveNum(m_channel2, TYPE_CAN);
         if(frameCount > 0)
         {
-            frameCount = ZCAN_Receive(m_channel2,recvCANData,(frameCount > 200 ? 200 : frameCount),50);
-            QVector<ZCAN_Receive_Data> vec(frameCount);
-            memcpy(vec.data(), recvCANData, frameCount * sizeof(ZCAN_Receive_Data));
-            recvedCANData(vec,frameCount,1);
+            int actualRead = ZCAN_Receive(m_channel2,recvCANData,(frameCount > 200 ? 200 : frameCount),50);
+            if (actualRead > 0)
+            {
+                QVector<ZCAN_Receive_Data> vec(actualRead);
+                memcpy(vec.data(), recvCANData, actualRead * sizeof(ZCAN_Receive_Data));
+                emit recvedCANData(vec,actualRead,1);
+            }
         }
         frameCount = ZCAN_GetReceiveNum(m_channel2, TYPE_CANFD);
         if(frameCount > 0)
         {
-            frameCount = ZCAN_ReceiveFD(m_channel2,recvCANFDData,(frameCount > 200 ? 200 : frameCount),50);
-            QVector<ZCAN_ReceiveFD_Data> vec(frameCount);
-            memcpy(vec.data(), recvCANFDData, frameCount * sizeof(ZCAN_ReceiveFD_Data));
-            recvedCANFDData(vec,frameCount,1);
+            int actualRead = ZCAN_ReceiveFD(m_channel2,recvCANFDData,(frameCount > 200 ? 200 : frameCount),50);
+            if (actualRead > 0)
+            {
+                QVector<ZCAN_ReceiveFD_Data> vec(actualRead);
+                memcpy(vec.data(), recvCANFDData, actualRead * sizeof(ZCAN_ReceiveFD_Data));
+                emit recvedCANFDData(vec,actualRead,1);
+            }
         }
         msleep(5);
     }

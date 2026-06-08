@@ -1,6 +1,8 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include <QDialog>
 #include <QDebug>
+#include <QScrollBar>
 #include <QMessageBox>
 #include <QTime>
 #include <QDateTime>
@@ -27,8 +29,10 @@ MainWindow::MainWindow(QWidget *parent) :
     m_isWaitingForAck = false;
     for (int i = 0; i < 2; ++i) {
         m_canTimestampBaseValid[i] = false;
-        m_canTimestampBaseUs[i] = 0;
+        m_canTimestampBaseRaw[i] = 0;
     }
+    m_parsedIMUElapsedBaseValid = false;
+    m_parsedIMUElapsedBaseMs = 0;
     ui->setupUi(this);
 
     // 二次开发：解除窗口尺寸锁定，允许窗口最大化和自由拉伸
@@ -55,12 +59,15 @@ MainWindow::MainWindow(QWidget *parent) :
 
     ui->tableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
     ui->tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
+    ui->tableWidget->horizontalHeader()->setStretchLastSection(true);
 
-    // 强行渲染表头（避开 Windows 系统默认主题干扰）
+    // 强行渲染表头（避开 Windows 系统默认主题干扰）并用整体背景覆盖解决右侧白条问题
     ui->tableWidget->horizontalHeader()->setStyleSheet(
+        "QHeaderView { background-color: #2e3440; }"
         "QHeaderView::section { background-color: #3b4252; color: #eceff4; border: 1px solid #2e3440; padding: 4px; font-weight: bold; }"
     );
     ui->tableWidget->verticalHeader()->setStyleSheet(
+        "QHeaderView { background-color: #2e3440; }"
         "QHeaderView::section { background-color: #3b4252; color: #eceff4; border: 1px solid #2e3440; padding: 4px; }"
     );
 
@@ -357,32 +364,62 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
 MainWindow::~MainWindow()
 {
+    if (canthread) {
+        canthread->stop();
+        canthread->wait(2000);
+        delete canthread;
+        canthread = nullptr;
+    }
+    if (m_serialPort) {
+        if (m_serialPort->isOpen()) {
+            m_serialPort->close();
+        }
+        delete m_serialPort;
+        m_serialPort = nullptr;
+    }
+    if (refreshTimer) {
+        refreshTimer->stop();
+    }
+    if (flushTimer) {
+        flushTimer->stop();
+    }
     delete ui;
 }
 
-QString MainWindow::formatCANReceiveTime(UINT64 deviceTimestampUs, UINT channel)
+QString MainWindow::formatCANReceiveTime(UINT64 deviceTimestampRaw, UINT channel)
 {
     // 周立功接收结构里的 timestamp 单位为 us。它比 UI 线程取当前时间更适合区分批量接收的多帧间隔。
     // 由于 timestamp 通常是设备相对计数，不是绝对年月日，这里用“第一帧设备时间 + 第一帧主机时间”
     // 建立映射，后续用设备微秒差值换算为本地显示时间。
-    if (channel >= 2 || deviceTimestampUs == 0) {
+    if (channel >= 2 || deviceTimestampRaw == 0) {
         return QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
     }
 
     const UINT64 resetJumpThresholdMs = 10ULL * 60ULL * 1000ULL; // 10分钟，防止重连/计数器异常跳变
 
     if (!m_canTimestampBaseValid[channel] ||
-        deviceTimestampUs < m_canTimestampBaseUs[channel] ||
-        deviceTimestampUs - m_canTimestampBaseUs[channel] > resetJumpThresholdMs) {
+        deviceTimestampRaw < m_canTimestampBaseRaw[channel] ||
+        deviceTimestampRaw - m_canTimestampBaseRaw[channel] > resetJumpThresholdMs) {
         m_canTimestampBaseValid[channel] = true;
-        m_canTimestampBaseUs[channel] = deviceTimestampUs;
+        m_canTimestampBaseRaw[channel] = deviceTimestampRaw;
         m_canTimestampBaseHostTime[channel] = QDateTime::currentDateTime();
         return m_canTimestampBaseHostTime[channel].toString("hh:mm:ss.zzz");
     }
 
-    UINT64 deltaMs = deviceTimestampUs - m_canTimestampBaseUs[channel];
+    UINT64 deltaMs = deviceTimestampRaw - m_canTimestampBaseRaw[channel];
     QDateTime displayTime = m_canTimestampBaseHostTime[channel].addMSecs(static_cast<qint64>(deltaMs));
     return displayTime.toString("hh:mm:ss.zzz");
+}
+
+qint64 MainWindow::getCANReceiveElapsedMs(UINT64 deviceTimestampRaw, UINT channel)
+{
+    if (channel >= 2 || deviceTimestampRaw == 0 || !m_canTimestampBaseValid[channel]) {
+        return m_parsedIMUStartTime.msecsTo(QDateTime::currentDateTime());
+    }
+    if (deviceTimestampRaw < m_canTimestampBaseRaw[channel]) {
+        return 0;
+    }
+    return static_cast<qint64>(deviceTimestampRaw - m_canTimestampBaseRaw[channel]);
 }
 
 void MainWindow::canRecvedCANData(QVector<ZCAN_Receive_Data> recvCANData,UINT frameCount,UINT channel)
@@ -396,8 +433,9 @@ void MainWindow::canRecvedCANData(QVector<ZCAN_Receive_Data> recvCANData,UINT fr
         
         // 馈给姿传感器解析
         QString receiveTimeText = formatCANReceiveTime(recvCANData[i].timestamp, channel);
+        qint64 receiveElapsedMs = getCANReceiveElapsedMs(recvCANData[i].timestamp, channel);
         IMUParser::getInstance()->parseCANFrame(can_id, recvCANData[i].frame.data, recvCANData[i].frame.can_dlc, receiveTimeText);
-        saveParsedIMUSnapshot(can_id, channel, receiveTimeText);
+        saveParsedIMUSnapshot(can_id, channel, receiveTimeText, receiveElapsedMs);
 
         messageList.clear();
         messageList << receiveTimeText;//时间
@@ -430,8 +468,9 @@ void MainWindow::canRecvedCANFDData(QVector<ZCAN_ReceiveFD_Data> recvCANFDData,U
 
         // 馈给姿传感器解析
         QString receiveTimeText = formatCANReceiveTime(recvCANFDData[i].timestamp, channel);
+        qint64 receiveElapsedMs = getCANReceiveElapsedMs(recvCANFDData[i].timestamp, channel);
         IMUParser::getInstance()->parseCANFrame(can_id, recvCANFDData[i].frame.data, recvCANFDData[i].frame.len, receiveTimeText);
-        saveParsedIMUSnapshot(can_id, channel, receiveTimeText);
+        saveParsedIMUSnapshot(can_id, channel, receiveTimeText, receiveElapsedMs);
 
         messageList.clear();
         messageList << receiveTimeText;//时间
@@ -554,7 +593,7 @@ void MainWindow::on_closeDeviceBtn_clicked()
     canthread->closeDevice();
     for (int i = 0; i < 2; ++i) {
         m_canTimestampBaseValid[i] = false;
-        m_canTimestampBaseUs[i] = 0;
+        m_canTimestampBaseRaw[i] = 0;
     }
     ui->initCANBtn->setEnabled(false);
     ui->StartCANBtn->setEnabled(false);
@@ -622,7 +661,7 @@ void MainWindow::on_reSetCANBtn_clicked()
     }
     for (int i = 0; i < 2; ++i) {
         m_canTimestampBaseValid[i] = false;
-        m_canTimestampBaseUs[i] = 0;
+        m_canTimestampBaseRaw[i] = 0;
     }
     ui->initCANBtn->setEnabled(true);
     ui->StartCANBtn->setEnabled(false);
@@ -703,21 +742,54 @@ void MainWindow::on_sendBtn_clicked()
 void MainWindow::AddDataToList(QStringList strList)
 {
     if (ui->checkBox_4->isChecked()) {
-        ui->tableWidget->insertRow(0);
-        for(int i = 0; i < strList.count();i ++)
-        {
-            QTableWidgetItem *item = new QTableWidgetItem(strList.at(i),0);
-            ui->tableWidget->setItem(0, i, item);
-            if(i != strList.count() - 1)
-                ui->tableWidget->item(0,i)->setTextAlignment(Qt::AlignCenter | Qt::AlignHCenter);
+        // 智能滚动判定：在插入数据前，获取并判断当前滚动条位置
+        QScrollBar *vBar = ui->tableWidget->verticalScrollBar();
+        bool autoScroll = true;
+        if (vBar) {
+            autoScroll = (vBar->value() >= vBar->maximum() - 2);
         }
-        if (ui->tableWidget->rowCount() > 100) {
-            ui->tableWidget->setRowCount(100);
+
+        // 性能优化 1：暂时禁用界面刷新更新，防止写入每个单元格都触发重绘
+        ui->tableWidget->setUpdatesEnabled(false);
+
+        int colCount = ui->tableWidget->columnCount();
+        int listSize = strList.count();
+        int colsToFill = qMin(colCount, listSize);
+
+        int currentRowCount = ui->tableWidget->rowCount();
+        int targetRow = currentRowCount;
+
+        // 性能优化 2：若表满 100 行，则先删首行再直接填入第 99 行，规避内存对象多次移动
+        if (currentRowCount >= 100) {
+            ui->tableWidget->removeRow(0);
+            targetRow = 99;
+        }
+
+        // 在尾部插入新空行
+        ui->tableWidget->insertRow(targetRow);
+
+        // 容错安全写入单元格
+        for (int i = 0; i < colsToFill; ++i) {
+            QTableWidgetItem *item = new QTableWidgetItem(strList.at(i), 0);
+            if (i != listSize - 1) {
+                item->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
+            } else {
+                item->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            }
+            ui->tableWidget->setItem(targetRow, i, item);
+        }
+
+        // 重新启用表格刷新
+        ui->tableWidget->setUpdatesEnabled(true);
+
+        // 智能滚动：如果需要滚动且存在滚动条，则滚动到底部
+        if (autoScroll && vBar) {
+            vBar->setValue(vBar->maximum());
         }
     }
 
     // 实时保存数据到本地文件 (强制使用 TXT 格式)
-    if (m_canFile.isOpen()) {
+    if (m_canFile.isOpen() && strList.count() >= 9) {
         QString logLine = QString("[%1] [通道%2] [%3] ID:%4 %5 帧类型:%6 DLC:%7 协议:%8 数据:%9\n")
                           .arg(strList.at(0))
                           .arg(strList.at(1))
@@ -886,13 +958,13 @@ void MainWindow::setupIMUDashboard()
     
     // 统一卡片样式表 (Nord 暗系风格)
     QString cardStyle = 
-        "QGroupBox { background-color: #2e3440; border: 2px solid #3b4252; border-radius: 8px; margin-top: 15px; color: #88c0d0; font-weight: bold; font-size: 14px; }"
+        "QGroupBox { background-color: #2e3440; border: 2px solid #3b4252; border-radius: 8px; margin-top: 15px; color: #88c0d0; font-weight: bold; font-size: 16px; }"
         "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 5px; background-color: #2e3440; color: #88c0d0; }"
-        "QLabel { color: #d8dee9; font-size: 13px; font-weight: 500; }"; // 强制卡片内所有默认文本为浅灰色
+        "QLabel { color: #d8dee9; font-size: 15px; font-weight: 500; }"; // 强制卡片内所有默认文本为浅灰色
     
     // 覆盖样式表 (直接写属性，不写类选择器，防Qt解析失效)
-    QString valStyle = "color: #8fbcbb; font-size: 28px; font-weight: bold; font-family: 'Consolas', 'Courier New', monospace;";
-    QString unitStyle = "color: #eceff4; font-size: 14px; font-weight: bold;";
+    QString valStyle = "color: #8fbcbb; font-size: 34px; font-weight: bold; font-family: 'Consolas', 'Courier New', monospace;";
+    QString unitStyle = "color: #eceff4; font-size: 16px; font-weight: bold;";
     
     // 1. 角度卡片 (Roll, Pitch, Yaw)
     QGroupBox *boxAng = new QGroupBox(QString::fromUtf8("1. 实时姿态角度 (Intel 格式)"), imuTab);
@@ -1023,32 +1095,32 @@ void MainWindow::setupIMUDashboard()
     
     gridVer->addWidget(new QLabel(QString::fromUtf8("固件版本:"), boxVer), 0, 0);
     valVer = new QLabel("V0.0.0", boxVer);
-    valVer->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 14px;");
+    valVer->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 16px;");
     gridVer->addWidget(valVer, 0, 1);
     
     gridVer->addWidget(new QLabel(QString::fromUtf8("内部版本号:"), boxVer), 1, 0);
     valInternalVer = new QLabel("0", boxVer);
-    valInternalVer->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 14px;");
+    valInternalVer->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 16px;");
     gridVer->addWidget(valInternalVer, 1, 1);
     
     gridVer->addWidget(new QLabel(QString::fromUtf8("版本类别:"), boxVer), 2, 0);
     valVerType = new QLabel("0", boxVer);
-    valVerType->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 14px;");
+    valVerType->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 16px;");
     gridVer->addWidget(valVerType, 2, 1);
     
     gridVer->addWidget(new QLabel(QString::fromUtf8("车型平台:"), boxVer), 3, 0);
     valPlatformType = new QLabel("3", boxVer);
-    valPlatformType->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 14px;");
+    valPlatformType->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 16px;");
     gridVer->addWidget(valPlatformType, 3, 1);
     
     gridVer->addWidget(new QLabel(QString::fromUtf8("平台变型号:"), boxVer), 4, 0);
     valPlatformVarNo = new QLabel("0", boxVer);
-    valPlatformVarNo->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 14px;");
+    valPlatformVarNo->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 16px;");
     gridVer->addWidget(valPlatformVarNo, 4, 1);
     
     gridVer->addWidget(new QLabel(QString::fromUtf8("发布日期:"), boxVer), 5, 0);
     valDate = new QLabel("2000-01-01", boxVer);
-    valDate->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 14px;");
+    valDate->setStyleSheet("color: #eceff4; font-weight: bold; font-size: 16px;");
     gridVer->addWidget(valDate, 5, 1);
     
     leftLayout->addWidget(boxVer);
@@ -1082,8 +1154,9 @@ void MainWindow::setupIMUDashboard()
     faultTableWidget->horizontalHeader()->setStretchLastSection(true);
     
     faultTableWidget->setStyleSheet(
-        "QTableWidget { background-color: #2e3440; gridline-color: #3b4252; color: #eceff4; font-size: 12px; }"
-        "QHeaderView::section { background-color: #3b4252; color: #d8dee9; padding: 5px; border: 1px solid #2e3440; font-weight: bold; }"
+        "QTableWidget { background-color: #2e3440; gridline-color: #3b4252; color: #eceff4; font-size: 14px; }"
+        "QHeaderView { background-color: #2e3440; }"
+        "QHeaderView::section { background-color: #3b4252; color: #d8dee9; padding: 6px; border: 1px solid #2e3440; font-weight: bold; font-size: 13px; }"
     );
     
     for (int i = 0; i < 29; ++i) {
@@ -1287,7 +1360,8 @@ void MainWindow::refreshIMUDashboard()
     }
 
     // 7. 原始数据透传 Tab 数据刷新
-    QList<IMURawPacket> rawPackets = IMUParser::getInstance()->takeIMURawPackets();
+    const int maxRawPacketsPerRefresh = 200;
+    QList<IMURawPacket> rawPackets = IMUParser::getInstance()->takeIMURawPackets(maxRawPacketsPerRefresh);
     if (!rawPackets.isEmpty()) {
         const IMURawPacket &latestRawPacket = rawPackets.last();
         m_lastRawTime = QTime::currentTime();
@@ -1309,13 +1383,21 @@ void MainWindow::refreshIMUDashboard()
         rawAttitudeWidget->setRollPitch(rawDisplayRoll, rawDisplayPitch);
 
         // 刷新统计看板
-        unsigned int total = 0, success = 0, failed = 0;
-        IMUParser::getInstance()->getIMURawStats(total, success, failed);
+        unsigned int total = 0, success = 0, failed = 0, dropped = 0;
+        IMUParser::getInstance()->getIMURawStats(total, success, failed, dropped);
         lblRawStats->setText(QString(QString::fromUtf8("包计数 - 已解析: %1 | 校验成功: %2 | 校验失败: %3"))
                              .arg(total).arg(success).arg(failed));
 
         // 更新数据表格内容
         rawTableWidget->item(0, 2)->setText(QString::number(rawData.pcNum * 0.005, 'f', 2)); // pcNum 为 5ms 周期计数
+        lblRawStats->setText(QString("Packets: %1 | OK: %2 | Failed: %3 | Dropped: %4")
+                             .arg(total).arg(success).arg(failed).arg(dropped));
+        if (dropped > 0) {
+            lblRawStats->setStyleSheet("color: #ebcb8b; font-size: 12px;");
+        } else {
+            lblRawStats->setStyleSheet("color: #88c0d0; font-size: 12px;");
+        }
+
         rawTableWidget->item(0, 6)->setText(QString("%1 / %2").arg(rawData.totalAlignTime).arg(rawData.remainAlignTime));
         rawTableWidget->item(0, 10)->setText(QString(QString::fromUtf8("陀螺: %1℃ / 加表: %2℃"))
                                              .arg((int)rawData.gyroTemp).arg((int)rawData.accelTemp));
@@ -1509,31 +1591,38 @@ void MainWindow::setupRawTab()
     layRawCmd->setContentsMargins(15, 20, 15, 15);
     layRawCmd->setSpacing(8);
 
-    QString labelStyle = "QLabel { color: #d8dee9; font-size: 12px; }";
-    QString editStyle = "QLineEdit { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 3px; font-family: 'Consolas'; } QLineEdit:focus { border-color: #88c0d0; }";
+    QString labelStyle = "QLabel { color: #d8dee9; font-size: 14px; }";
+    QString editStyle = "QLineEdit { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 4px; font-family: 'Consolas'; font-size: 13px; } QLineEdit:focus { border-color: #88c0d0; }";
 
     QLabel *lblLon = new QLabel(QString::fromUtf8("经度(°):"), boxRawCmd); lblLon->setStyleSheet(labelStyle);
-    rawEditLon = new QLineEdit("116.2833175", boxRawCmd); rawEditLon->setStyleSheet(editStyle);
+    rawEditLon = new QLineEdit(boxRawCmd); rawEditLon->setStyleSheet(editStyle); rawEditLon->setPlaceholderText("116.2833175");
     QLabel *lblLat = new QLabel(QString::fromUtf8("纬度(°):"), boxRawCmd); lblLat->setStyleSheet(labelStyle);
-    rawEditLat = new QLineEdit("39.8287277", boxRawCmd); rawEditLat->setStyleSheet(editStyle);
+    rawEditLat = new QLineEdit(boxRawCmd); rawEditLat->setStyleSheet(editStyle); rawEditLat->setPlaceholderText("39.8287277");
     QLabel *lblAlt = new QLabel(QString::fromUtf8("高度(m):"), boxRawCmd); lblAlt->setStyleSheet(labelStyle);
-    rawEditAlt = new QLineEdit("10.0", boxRawCmd); rawEditAlt->setStyleSheet(editStyle);
+    rawEditAlt = new QLineEdit(boxRawCmd); rawEditAlt->setStyleSheet(editStyle); rawEditAlt->setPlaceholderText("10.0");
     QLabel *lblAlignTime = new QLabel(QString::fromUtf8("对准时间(s):"), boxRawCmd); lblAlignTime->setStyleSheet(labelStyle);
-    rawEditAlignTime = new QLineEdit("270.0", boxRawCmd); rawEditAlignTime->setStyleSheet(editStyle);
+    rawEditAlignTime = new QLineEdit(boxRawCmd); rawEditAlignTime->setStyleSheet(editStyle); rawEditAlignTime->setPlaceholderText("270.0");
 
     QLabel *lblBindHeading = new QLabel(QString::fromUtf8("装订航向(°):"), boxRawCmd); lblBindHeading->setStyleSheet(labelStyle);
-    rawEditBindHeading = new QLineEdit("0.0", boxRawCmd); rawEditBindHeading->setStyleSheet(editStyle);
+    rawEditBindHeading = new QLineEdit(boxRawCmd); rawEditBindHeading->setStyleSheet(editStyle); rawEditBindHeading->setPlaceholderText("0.0");
 
     QLabel *lblFront = new QLabel(QString::fromUtf8("前向杆臂(m):"), boxRawCmd); lblFront->setStyleSheet(labelStyle);
-    rawEditFrontLever = new QLineEdit("0.0", boxRawCmd); rawEditFrontLever->setStyleSheet(editStyle);
-    QLabel *lblRight = new QLabel(QString::fromUtf8("右向杆臂(m):"), boxRawCmd); lblRight->setStyleSheet(labelStyle);
-    rawEditRightLever = new QLineEdit("0.0", boxRawCmd); rawEditRightLever->setStyleSheet(editStyle);
-    QLabel *lblDown = new QLabel(QString::fromUtf8("下向杆臂(m):"), boxRawCmd); lblDown->setStyleSheet(labelStyle);
-    rawEditDownLever = new QLineEdit("0.0", boxRawCmd); rawEditDownLever->setStyleSheet(editStyle);
+    rawEditFrontLever = new QLineEdit(boxRawCmd); rawEditFrontLever->setStyleSheet(editStyle); rawEditFrontLever->setPlaceholderText("0.0");
+    QLabel *lblRight = new QLabel(QString::fromUtf8("左向杆臂(m):"), boxRawCmd); lblRight->setStyleSheet(labelStyle);
+    rawEditRightLever = new QLineEdit(boxRawCmd); rawEditRightLever->setStyleSheet(editStyle); rawEditRightLever->setPlaceholderText("0.0");
+    QLabel *lblDown = new QLabel(QString::fromUtf8("上向杆臂(m):"), boxRawCmd); lblDown->setStyleSheet(labelStyle);
+    rawEditUpLever = new QLineEdit(boxRawCmd); rawEditUpLever->setStyleSheet(editStyle); rawEditUpLever->setPlaceholderText("0.0");
 
     QLabel *lblOutBaud = new QLabel(QString::fromUtf8("输出波特率:"), boxRawCmd); lblOutBaud->setStyleSheet(labelStyle);
     rawCmbOutBaud = new QComboBox(boxRawCmd);
-    rawCmbOutBaud->addItems(QStringList() << "9600" << "19200" << "38400" << "57600" << "115200" << "230400" << "460800" << "921600");
+    rawCmbOutBaud->addItem("9600", 0);
+    rawCmbOutBaud->addItem("19200", 6);
+    rawCmbOutBaud->addItem("38400", 1);
+    rawCmbOutBaud->addItem("57600", 7);
+    rawCmbOutBaud->addItem("115200", 2);
+    rawCmbOutBaud->addItem("230400", 3);
+    rawCmbOutBaud->addItem("460800", 4);
+    rawCmbOutBaud->addItem("921600", 5);
     rawCmbOutBaud->setCurrentIndex(4); // 115200
     rawCmbOutBaud->setStyleSheet("QComboBox { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 3px; }");
 
@@ -1543,12 +1632,12 @@ void MainWindow::setupRawTab()
     rawCmbOutPeriod->setCurrentIndex(1); // 10ms
     rawCmbOutPeriod->setStyleSheet("QComboBox { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 3px; }");
 
-    QLabel *lblRollErr = new QLabel(QString::fromUtf8("横滚安装角(°):"), boxRawCmd); lblRollErr->setStyleSheet(labelStyle);
-    rawEditRollError = new QLineEdit("0.0", boxRawCmd); rawEditRollError->setStyleSheet(editStyle);
-    QLabel *lblPitchErr = new QLabel(QString::fromUtf8("俯仰安装角(°):"), boxRawCmd); lblPitchErr->setStyleSheet(labelStyle);
-    rawEditPitchError = new QLineEdit("0.0", boxRawCmd); rawEditPitchError->setStyleSheet(editStyle);
+    QLabel *lblRollErr = new QLabel(QString::fromUtf8("滚动安装角(°):"), boxRawCmd); lblRollErr->setStyleSheet(labelStyle);
+    rawEditRollError = new QLineEdit(boxRawCmd); rawEditRollError->setStyleSheet(editStyle); rawEditRollError->setPlaceholderText("0.0");
     QLabel *lblYawErr = new QLabel(QString::fromUtf8("航向安装角(°):"), boxRawCmd); lblYawErr->setStyleSheet(labelStyle);
-    rawEditYawError = new QLineEdit("0.0", boxRawCmd); rawEditYawError->setStyleSheet(editStyle);
+    rawEditYawError = new QLineEdit(boxRawCmd); rawEditYawError->setStyleSheet(editStyle); rawEditYawError->setPlaceholderText("0.0");
+    QLabel *lblPitchErr = new QLabel(QString::fromUtf8("俯仰安装角(°):"), boxRawCmd); lblPitchErr->setStyleSheet(labelStyle);
+    rawEditPitchError = new QLineEdit(boxRawCmd); rawEditPitchError->setStyleSheet(editStyle); rawEditPitchError->setPlaceholderText("0.0");
 
     QLabel *lblCmd = new QLabel(QString::fromUtf8("选择控制指令:"), boxRawCmd); lblCmd->setStyleSheet(labelStyle);
     rawCmbCmdType = new QComboBox(boxRawCmd);
@@ -1561,6 +1650,9 @@ void MainWindow::setupRawTab()
         << QString::fromUtf8("写入通信参数至Flash (0x0099)")
         << QString::fromUtf8("写入安装误差角至Flash (0x00AA)")
         << QString::fromUtf8("写入全部参数至Flash (0x00AA, 模式0x007F)")
+        << QString::fromUtf8("写入姿态角转导航至Flash (0x00BB)")
+        << QString::fromUtf8("写入陀螺零偏至Flash (0x00CC)")
+        << QString::fromUtf8("写入杆臂至Flash (0x00DD)")
         << QString::fromUtf8("自定义十六进制指令")
     );
     rawCmbCmdType->setView(new QListView(this));
@@ -1578,24 +1670,50 @@ void MainWindow::setupRawTab()
     rawBtnSendCmd = new QPushButton(QString::fromUtf8("发送指令 (CAN)"), boxRawCmd);
     rawBtnSendCmd->setStyleSheet("QPushButton { background-color: #5e81ac; color: #eceff4; border-radius: 4px; padding: 6px 12px; font-weight: bold; } QPushButton:hover { background-color: #81a1c1; }");
 
+    QLabel *lblSendHex = new QLabel(QString::fromUtf8("发送HEX (下行):"), boxRawCmd); lblSendHex->setStyleSheet(labelStyle);
+    rawEditSendHex = new QLineEdit(boxRawCmd);
+    rawEditSendHex->setReadOnly(true);
+    rawEditSendHex->setPlaceholderText(QString::fromUtf8("尚未发送指令"));
+    rawEditSendHex->setStyleSheet(editStyle);
+
     layRawCmd->addWidget(lblLon, 0, 0); layRawCmd->addWidget(rawEditLon, 0, 1);
     layRawCmd->addWidget(lblLat, 0, 2); layRawCmd->addWidget(rawEditLat, 0, 3);
     layRawCmd->addWidget(lblAlt, 1, 0); layRawCmd->addWidget(rawEditAlt, 1, 1);
     layRawCmd->addWidget(lblAlignTime, 1, 2); layRawCmd->addWidget(rawEditAlignTime, 1, 3);
     layRawCmd->addWidget(lblBindHeading, 2, 0); layRawCmd->addWidget(rawEditBindHeading, 2, 1);
     
-    layRawCmd->addWidget(lblFront, 3, 0); layRawCmd->addWidget(rawEditFrontLever, 3, 1);
-    layRawCmd->addWidget(lblRight, 3, 2); layRawCmd->addWidget(rawEditRightLever, 3, 3);
-    layRawCmd->addWidget(lblDown, 4, 0); layRawCmd->addWidget(rawEditDownLever, 4, 1);
+    layRawCmd->addWidget(lblOutBaud, 3, 0); layRawCmd->addWidget(rawCmbOutBaud, 3, 1);
+    layRawCmd->addWidget(lblOutPeriod, 3, 2); layRawCmd->addWidget(rawCmbOutPeriod, 3, 3);
 
-    layRawCmd->addWidget(lblOutBaud, 5, 0); layRawCmd->addWidget(rawCmbOutBaud, 5, 1);
-    layRawCmd->addWidget(lblOutPeriod, 5, 2); layRawCmd->addWidget(rawCmbOutPeriod, 5, 3);
-    layRawCmd->addWidget(lblRollErr, 6, 0); layRawCmd->addWidget(rawEditRollError, 6, 1);
-    layRawCmd->addWidget(lblPitchErr, 6, 2); layRawCmd->addWidget(rawEditPitchError, 6, 3);
-    layRawCmd->addWidget(lblYawErr, 7, 0); layRawCmd->addWidget(rawEditYawError, 7, 1, 1, 3);
-    layRawCmd->addWidget(lblCmd, 8, 0); layRawCmd->addWidget(rawCmbCmdType, 8, 1, 1, 3);
-    layRawCmd->addWidget(rawEditCustomHexCmd, 9, 0, 1, 4);
-    layRawCmd->addWidget(rawBtnSendCmd, 10, 0, 1, 4);
+    // Lever Arms (Front, Left, Up) in one row
+    QHBoxLayout *layRawLeverArms = new QHBoxLayout();
+    layRawLeverArms->setContentsMargins(0, 0, 0, 0);
+    layRawLeverArms->setSpacing(6);
+    layRawLeverArms->addWidget(lblFront);
+    layRawLeverArms->addWidget(rawEditFrontLever);
+    layRawLeverArms->addWidget(lblRight);
+    layRawLeverArms->addWidget(rawEditRightLever);
+    layRawLeverArms->addWidget(lblDown);
+    layRawLeverArms->addWidget(rawEditUpLever);
+    layRawCmd->addLayout(layRawLeverArms, 4, 0, 1, 4);
+
+    // Installation angles (Roll X, Yaw Y, Pitch Z) in one row
+    QHBoxLayout *layRawAngles = new QHBoxLayout();
+    layRawAngles->setContentsMargins(0, 0, 0, 0);
+    layRawAngles->setSpacing(6);
+    layRawAngles->addWidget(lblRollErr);
+    layRawAngles->addWidget(rawEditRollError);
+    layRawAngles->addWidget(lblYawErr);
+    layRawAngles->addWidget(rawEditYawError);
+    layRawAngles->addWidget(lblPitchErr);
+    layRawAngles->addWidget(rawEditPitchError);
+    layRawCmd->addLayout(layRawAngles, 5, 0, 1, 4);
+
+    layRawCmd->addWidget(lblCmd, 6, 0); layRawCmd->addWidget(rawCmbCmdType, 6, 1, 1, 3);
+    layRawCmd->addWidget(rawEditCustomHexCmd, 7, 0, 1, 4);
+    layRawCmd->addWidget(rawBtnSendCmd, 8, 0, 1, 4);
+    layRawCmd->addWidget(lblSendHex, 9, 0);
+    layRawCmd->addWidget(rawEditSendHex, 9, 1, 1, 3);
 
     layLeft->addWidget(boxRawCmd);
     layLeft->addStretch(1);
@@ -1623,7 +1741,7 @@ void MainWindow::setupRawTab()
     rawTableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
     rawTableWidget->setSelectionMode(QAbstractItemView::NoSelection);
     rawTableWidget->setStyleSheet(
-        "QTableWidget { background-color: #2e3440; gridline-color: #4c566a; color: #eceff4; font-size: 12px; }"
+        "QTableWidget { background-color: #2e3440; gridline-color: #4c566a; color: #eceff4; font-size: 14px; }"
         "QTableWidget::item { border: 1px solid #4c566a; }" // 为单元格绘制清晰的边框线
     );
 
@@ -1708,7 +1826,7 @@ void MainWindow::setupRawTab()
 
     rawTableWidget->item(2, 0)->setText(QString::fromUtf8("--- 惯性测量与姿态数据 ---"));
     rawTableWidget->item(2, 0)->setForeground(QBrush(QColor("#88c0d0")));
-    rawTableWidget->item(2, 0)->setFont(QFont("Arial", 10, QFont::Bold));
+    rawTableWidget->item(2, 0)->setFont(QFont("Arial", 12, QFont::Bold));
 
     rawTableWidget->item(3, 0)->setText(QString::fromUtf8("角速度(°/s)"));
     rawTableWidget->item(4, 0)->setText(QString::fromUtf8("加速度(g)"));
@@ -1718,14 +1836,14 @@ void MainWindow::setupRawTab()
 
     rawTableWidget->item(8, 0)->setText(QString::fromUtf8("--- 位置定位与运动速度 ---"));
     rawTableWidget->item(8, 0)->setForeground(QBrush(QColor("#88c0d0")));
-    rawTableWidget->item(8, 0)->setFont(QFont("Arial", 10, QFont::Bold));
+    rawTableWidget->item(8, 0)->setFont(QFont("Arial", 12, QFont::Bold));
 
     rawTableWidget->item(9, 0)->setText(QString::fromUtf8("物理位置"));
     rawTableWidget->item(10, 0)->setText(QString::fromUtf8("导航速度(m/s)"));
 
     rawTableWidget->item(11, 0)->setText(QString::fromUtf8("--- 传感器错误与超量程计数 ---"));
     rawTableWidget->item(11, 0)->setForeground(QBrush(QColor("#88c0d0")));
-    rawTableWidget->item(11, 0)->setFont(QFont("Arial", 10, QFont::Bold));
+    rawTableWidget->item(11, 0)->setFont(QFont("Arial", 12, QFont::Bold));
 
     rawTableWidget->item(12, 0)->setText(QString::fromUtf8("陀螺超量程"));
     rawTableWidget->item(13, 0)->setText(QString::fromUtf8("加表超量程"));
@@ -1794,7 +1912,7 @@ void MainWindow::setupRawTab()
             } else if (c == 0 || (r == 0 && (c == 4 || c == 8)) || (r == 14 && (c == 4 || c == 9))) {
                 it->setBackground(QBrush(QColor("#2e3440")));
                 it->setForeground(QBrush(QColor("#d8dee9")));
-                it->setFont(QFont("Arial", 9, QFont::Bold));
+                it->setFont(QFont("Arial", 11, QFont::Bold));
             } else {
                 it->setBackground(QBrush(QColor("#3b4252")));
                 it->setForeground(QBrush(QColor("#eceff4")));
@@ -1923,6 +2041,8 @@ void MainWindow::onSaveParsedIMUStateChanged(int state)
             m_parsedIMUStream.setDevice(&m_parsedIMUFile);
             m_parsedIMUStream.setCodec("UTF-8");
             m_parsedIMUStartTime = QDateTime::currentDateTime();
+            m_parsedIMUElapsedBaseValid = false;
+            m_parsedIMUElapsedBaseMs = 0;
             m_parsedIMUStream << "timestamp,elapsed_ms,channel,can_id,update_type,"
                               << "roll_deg,pitch_deg,yaw_deg,"
                               << "ax_g,ay_g,az_g,"
@@ -1943,7 +2063,7 @@ void MainWindow::onSaveParsedIMUStateChanged(int state)
     }
 }
 
-void MainWindow::saveParsedIMUSnapshot(UINT canId, UINT channel, const QString &receiveTimeText)
+void MainWindow::saveParsedIMUSnapshot(UINT canId, UINT channel, const QString &receiveTimeText, qint64 receiveElapsedMs)
 {
     if (!m_parsedIMUFile.isOpen()) {
         return;
@@ -2005,7 +2125,11 @@ void MainWindow::saveParsedIMUSnapshot(UINT canId, UINT channel, const QString &
     }
 
     QDateTime now = QDateTime::currentDateTime();
-    qint64 elapsedMs = m_parsedIMUStartTime.msecsTo(now);
+    if (!m_parsedIMUElapsedBaseValid || receiveElapsedMs < m_parsedIMUElapsedBaseMs) {
+        m_parsedIMUElapsedBaseValid = true;
+        m_parsedIMUElapsedBaseMs = receiveElapsedMs;
+    }
+    qint64 elapsedMs = receiveElapsedMs - m_parsedIMUElapsedBaseMs;
     QString csvTimeText = receiveTimeText;
     if (csvTimeText.isEmpty()) {
         csvTimeText = now.toString("yyyy-MM-dd hh:mm:ss.zzz");
@@ -2152,10 +2276,46 @@ void MainWindow::onQuickStartClicked()
     btnQuickStart->setText(QString::fromUtf8("✅ 已启动"));
 }
 
+void MainWindow::stopCANSaveWithWarning(const QString &errorMessage)
+{
+    if (m_canFile.isOpen()) {
+        m_canStream.flush();
+        m_canFile.close();
+    }
+    chkSaveCAN->blockSignals(true);
+    chkSaveCAN->setChecked(false);
+    chkSaveCAN->blockSignals(false);
+    QMessageBox::warning(this,
+                         QString::fromUtf8("警告"),
+                         QString::fromUtf8("CAN日志保存失败，已自动停止：") + errorMessage);
+}
+
+void MainWindow::stopRawSaveWithWarning(const QString &errorMessage)
+{
+    if (m_rawFile.isOpen()) {
+        m_rawStream.flush();
+        m_rawFile.close();
+    }
+    if (m_rawBinFile.isOpen()) {
+        m_rawBinFile.flush();
+        m_rawBinFile.close();
+    }
+    chkSaveRaw->blockSignals(true);
+    chkSaveRaw->setChecked(false);
+    chkSaveRaw->blockSignals(false);
+    QMessageBox::warning(this,
+                         QString::fromUtf8("警告"),
+                         QString::fromUtf8("透传日志保存失败，已自动停止：") + errorMessage);
+}
+
 void MainWindow::onFlushTimeout()
 {
     if (m_canFile.isOpen()) {
         m_canStream.flush();
+        m_canFile.flush();
+        if (m_canFile.error() != QFileDevice::NoError) {
+            stopCANSaveWithWarning(m_canFile.errorString());
+        }
     }
     if (m_parsedIMUFile.isOpen()) {
         m_parsedIMUStream.flush();
@@ -2173,9 +2333,18 @@ void MainWindow::onFlushTimeout()
     }
     if (m_rawFile.isOpen()) {
         m_rawStream.flush();
+        m_rawFile.flush();
+        if (m_rawFile.error() != QFileDevice::NoError) {
+            stopRawSaveWithWarning(m_rawFile.errorString());
+            return;
+        }
     }
     if (m_rawBinFile.isOpen()) {
         m_rawBinFile.flush();
+        if (m_rawBinFile.error() != QFileDevice::NoError) {
+            stopRawSaveWithWarning(m_rawBinFile.errorString());
+            return;
+        }
     }
     if (m_serialTxtFile.isOpen()) {
         m_serialTxtStream.flush();
@@ -2262,36 +2431,43 @@ void MainWindow::setupSerialTab()
     layCmd->setContentsMargins(15, 20, 15, 15);
     layCmd->setSpacing(8);
 
-    QString labelStyle = "QLabel { color: #d8dee9; font-size: 12px; }";
-    QString editStyle = "QLineEdit { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 3px; font-family: 'Consolas'; } QLineEdit:focus { border-color: #88c0d0; }";
+    QString labelStyle = "QLabel { color: #d8dee9; font-size: 14px; }";
+    QString editStyle = "QLineEdit { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 4px; font-family: 'Consolas'; font-size: 13px; } QLineEdit:focus { border-color: #88c0d0; }";
 
     // 经纬高与对准时间
     QLabel *lblLon = new QLabel(QString::fromUtf8("经度(°):"), boxCmd); lblLon->setStyleSheet(labelStyle);
-    editLon = new QLineEdit("116.2833175", boxCmd); editLon->setStyleSheet(editStyle);
+    editLon = new QLineEdit(boxCmd); editLon->setStyleSheet(editStyle); editLon->setPlaceholderText("116.2833175");
     QLabel *lblLat = new QLabel(QString::fromUtf8("纬度(°):"), boxCmd); lblLat->setStyleSheet(labelStyle);
-    editLat = new QLineEdit("39.8287277", boxCmd); editLat->setStyleSheet(editStyle);
+    editLat = new QLineEdit(boxCmd); editLat->setStyleSheet(editStyle); editLat->setPlaceholderText("39.8287277");
     QLabel *lblAlt = new QLabel(QString::fromUtf8("高度(m):"), boxCmd); lblAlt->setStyleSheet(labelStyle);
-    editAlt = new QLineEdit("10.0", boxCmd); editAlt->setStyleSheet(editStyle);
+    editAlt = new QLineEdit(boxCmd); editAlt->setStyleSheet(editStyle); editAlt->setPlaceholderText("10.0");
     QLabel *lblAlignTime = new QLabel(QString::fromUtf8("对准时间(s):"), boxCmd); lblAlignTime->setStyleSheet(labelStyle);
-    editAlignTime = new QLineEdit("270.0", boxCmd); editAlignTime->setStyleSheet(editStyle);
+    editAlignTime = new QLineEdit(boxCmd); editAlignTime->setStyleSheet(editStyle); editAlignTime->setPlaceholderText("270.0");
 
     // 外部航向装订
     QLabel *lblBindHeading = new QLabel(QString::fromUtf8("装订航向(°):"), boxCmd); lblBindHeading->setStyleSheet(labelStyle);
-    editBindHeading = new QLineEdit("0.0", boxCmd); editBindHeading->setStyleSheet(editStyle);
+    editBindHeading = new QLineEdit(boxCmd); editBindHeading->setStyleSheet(editStyle); editBindHeading->setPlaceholderText("0.0");
 
     // 杆臂参数配置
     QLabel *lblFront = new QLabel(QString::fromUtf8("前向杆臂(m):"), boxCmd); lblFront->setStyleSheet(labelStyle);
-    editFrontLever = new QLineEdit("0.0", boxCmd); editFrontLever->setStyleSheet(editStyle);
-    QLabel *lblRight = new QLabel(QString::fromUtf8("右向杆臂(m):"), boxCmd); lblRight->setStyleSheet(labelStyle);
-    editRightLever = new QLineEdit("0.0", boxCmd); editRightLever->setStyleSheet(editStyle);
-    QLabel *lblDown = new QLabel(QString::fromUtf8("下向杆臂(m):"), boxCmd); lblDown->setStyleSheet(labelStyle);
-    editDownLever = new QLineEdit("0.0", boxCmd); editDownLever->setStyleSheet(editStyle);
+    editFrontLever = new QLineEdit(boxCmd); editFrontLever->setStyleSheet(editStyle); editFrontLever->setPlaceholderText("0.0");
+    QLabel *lblRight = new QLabel(QString::fromUtf8("左向杆臂(m):"), boxCmd); lblRight->setStyleSheet(labelStyle);
+    editRightLever = new QLineEdit(boxCmd); editRightLever->setStyleSheet(editStyle); editRightLever->setPlaceholderText("0.0");
+    QLabel *lblDown = new QLabel(QString::fromUtf8("上向杆臂(m):"), boxCmd); lblDown->setStyleSheet(labelStyle);
+    editUpLever = new QLineEdit(boxCmd); editUpLever->setStyleSheet(editStyle); editUpLever->setPlaceholderText("0.0");
 
     // 通信参数
     QLabel *lblOutBaud = new QLabel(QString::fromUtf8("输出波特率:"), boxCmd); lblOutBaud->setStyleSheet(labelStyle);
     cmbOutBaud = new QComboBox(boxCmd);
-    cmbOutBaud->addItems(QStringList() << "9600" << "19200" << "38400" << "57600" << "115200" << "230400" << "460800" << "921600");
-    cmbOutBaud->setCurrentIndex(4); // 115200
+    cmbOutBaud->addItem("9600", 0);
+    cmbOutBaud->addItem("19200", 6);
+    cmbOutBaud->addItem("38400", 1);
+    cmbOutBaud->addItem("57600", 7);
+    cmbOutBaud->addItem("115200", 2);
+    cmbOutBaud->addItem("230400", 3);
+    cmbOutBaud->addItem("460800", 4);
+    cmbOutBaud->addItem("921600", 5);
+    cmbOutBaud->setCurrentIndex(6); // 460800
     cmbOutBaud->setStyleSheet("QComboBox { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 3px; }");
 
     QLabel *lblOutPeriod = new QLabel(QString::fromUtf8("输出周期:"), boxCmd); lblOutPeriod->setStyleSheet(labelStyle);
@@ -2301,12 +2477,12 @@ void MainWindow::setupSerialTab()
     cmbOutPeriod->setStyleSheet("QComboBox { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 3px; }");
 
     // 安装角误差
-    QLabel *lblRollErr = new QLabel(QString::fromUtf8("横滚安装角(°):"), boxCmd); lblRollErr->setStyleSheet(labelStyle);
-    editRollError = new QLineEdit("0.0", boxCmd); editRollError->setStyleSheet(editStyle);
-    QLabel *lblPitchErr = new QLabel(QString::fromUtf8("俯仰安装角(°):"), boxCmd); lblPitchErr->setStyleSheet(labelStyle);
-    editPitchError = new QLineEdit("0.0", boxCmd); editPitchError->setStyleSheet(editStyle);
+    QLabel *lblRollErr = new QLabel(QString::fromUtf8("滚动安装角(°):"), boxCmd); lblRollErr->setStyleSheet(labelStyle);
+    editRollError = new QLineEdit(boxCmd); editRollError->setStyleSheet(editStyle); editRollError->setPlaceholderText("0.0");
     QLabel *lblYawErr = new QLabel(QString::fromUtf8("航向安装角(°):"), boxCmd); lblYawErr->setStyleSheet(labelStyle);
-    editYawError = new QLineEdit("0.0", boxCmd); editYawError->setStyleSheet(editStyle);
+    editYawError = new QLineEdit(boxCmd); editYawError->setStyleSheet(editStyle); editYawError->setPlaceholderText("0.0");
+    QLabel *lblPitchErr = new QLabel(QString::fromUtf8("俯仰安装角(°):"), boxCmd); lblPitchErr->setStyleSheet(labelStyle);
+    editPitchError = new QLineEdit(boxCmd); editPitchError->setStyleSheet(editStyle); editPitchError->setPlaceholderText("0.0");
 
     // 指令选择与发送按钮
     QLabel *lblCmd = new QLabel(QString::fromUtf8("选择控制指令:"), boxCmd); lblCmd->setStyleSheet(labelStyle);
@@ -2320,6 +2496,12 @@ void MainWindow::setupSerialTab()
         << QString::fromUtf8("写入通信参数至Flash (0x0099)")
         << QString::fromUtf8("写入安装误差角至Flash (0x00AA)")
         << QString::fromUtf8("写入全部参数至Flash (0x00AA, 模式0x007F)")
+        << QString::fromUtf8("写入姿态角转导航至Flash (0x00BB)")
+        << QString::fromUtf8("写入陀螺零偏至Flash (0x00CC)")
+        << QString::fromUtf8("写入杆臂至Flash (0x00DD)")
+        << QString::fromUtf8("读取用户使用参数配置 (0xCD44, blk9)")
+        << QString::fromUtf8("读取IMU零偏配置 (0xCD44, blk10)")
+        << QString::fromUtf8("读取用户协议配置 (0xCD44, blk11)")
     );
     cmbCmdType->setView(new QListView(this));
     cmbCmdType->setStyleSheet(
@@ -2338,17 +2520,43 @@ void MainWindow::setupSerialTab()
     layCmd->addWidget(lblAlignTime, 1, 2); layCmd->addWidget(editAlignTime, 1, 3);
     layCmd->addWidget(lblBindHeading, 2, 0); layCmd->addWidget(editBindHeading, 2, 1);
     
-    layCmd->addWidget(lblFront, 3, 0); layCmd->addWidget(editFrontLever, 3, 1);
-    layCmd->addWidget(lblRight, 3, 2); layCmd->addWidget(editRightLever, 3, 3);
-    layCmd->addWidget(lblDown, 4, 0); layCmd->addWidget(editDownLever, 4, 1);
+    layCmd->addWidget(lblOutBaud, 3, 0); layCmd->addWidget(cmbOutBaud, 3, 1);
+    layCmd->addWidget(lblOutPeriod, 3, 2); layCmd->addWidget(cmbOutPeriod, 3, 3);
 
-    layCmd->addWidget(lblOutBaud, 5, 0); layCmd->addWidget(cmbOutBaud, 5, 1);
-    layCmd->addWidget(lblOutPeriod, 5, 2); layCmd->addWidget(cmbOutPeriod, 5, 3);
-    layCmd->addWidget(lblRollErr, 6, 0); layCmd->addWidget(editRollError, 6, 1);
-    layCmd->addWidget(lblPitchErr, 6, 2); layCmd->addWidget(editPitchError, 6, 3);
-    layCmd->addWidget(lblYawErr, 7, 0); layCmd->addWidget(editYawError, 7, 1, 1, 3);
-    layCmd->addWidget(lblCmd, 8, 0); layCmd->addWidget(cmbCmdType, 8, 1, 1, 3);
-    layCmd->addWidget(btnSendSerialCmd, 9, 0, 1, 4);
+    // Lever Arms (Front, Left, Up) in one row
+    QHBoxLayout *layLeverArms = new QHBoxLayout();
+    layLeverArms->setContentsMargins(0, 0, 0, 0);
+    layLeverArms->setSpacing(6);
+    layLeverArms->addWidget(lblFront);
+    layLeverArms->addWidget(editFrontLever);
+    layLeverArms->addWidget(lblRight);
+    layLeverArms->addWidget(editRightLever);
+    layLeverArms->addWidget(lblDown);
+    layLeverArms->addWidget(editUpLever);
+    layCmd->addLayout(layLeverArms, 4, 0, 1, 4);
+
+    // Installation angles (Roll X, Yaw Y, Pitch Z) in one row
+    QHBoxLayout *layAngles = new QHBoxLayout();
+    layAngles->setContentsMargins(0, 0, 0, 0);
+    layAngles->setSpacing(6);
+    layAngles->addWidget(lblRollErr);
+    layAngles->addWidget(editRollError);
+    layAngles->addWidget(lblYawErr);
+    layAngles->addWidget(editYawError);
+    layAngles->addWidget(lblPitchErr);
+    layAngles->addWidget(editPitchError);
+    layCmd->addLayout(layAngles, 5, 0, 1, 4);
+
+    layCmd->addWidget(lblCmd, 6, 0); layCmd->addWidget(cmbCmdType, 6, 1, 1, 3);
+    layCmd->addWidget(btnSendSerialCmd, 7, 0, 1, 4);
+
+    QLabel *lblSendHex = new QLabel(QString::fromUtf8("发送HEX (下行):"), boxCmd); lblSendHex->setStyleSheet(labelStyle);
+    editSendHex = new QLineEdit(boxCmd);
+    editSendHex->setReadOnly(true);
+    editSendHex->setPlaceholderText(QString::fromUtf8("尚未发送指令"));
+    editSendHex->setStyleSheet(editStyle);
+    layCmd->addWidget(lblSendHex, 8, 0);
+    layCmd->addWidget(editSendHex, 8, 1, 1, 3);
 
     layLeft->addWidget(boxCmd);
 
@@ -2372,7 +2580,7 @@ void MainWindow::setupSerialTab()
 
     serialConsoleLog = new QPlainTextEdit(boxConsole);
     serialConsoleLog->setReadOnly(true);
-    serialConsoleLog->setStyleSheet("background-color: #1e222a; color: #eceff4; font-family: 'Consolas', 'Courier New', monospace; font-size: 11px; border: 1px solid #3b4252; border-radius: 4px;");
+    serialConsoleLog->setStyleSheet("background-color: #1e222a; color: #eceff4; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; border: 1px solid #3b4252; border-radius: 4px;");
     serialConsoleLog->document()->setMaximumBlockCount(200);
 
     layConsole->addLayout(layLogBar);
@@ -2422,7 +2630,7 @@ void MainWindow::setupSerialTab()
     serialTableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
     serialTableWidget->setSelectionMode(QAbstractItemView::NoSelection);
     serialTableWidget->setStyleSheet(
-        "QTableWidget { background-color: #2e3440; gridline-color: #4c566a; color: #eceff4; font-size: 11px; }"
+        "QTableWidget { background-color: #2e3440; gridline-color: #4c566a; color: #eceff4; font-size: 14px; }"
         "QTableWidget::item { border: 1px solid #4c566a; }"
     );
 
@@ -2491,7 +2699,7 @@ void MainWindow::setupSerialTab()
     serialTableWidget->item(1, 0)->setText(QString::fromUtf8("状态字"));
     serialTableWidget->item(2, 0)->setText(QString::fromUtf8("--- 惯性测量与姿态数据 ---"));
     serialTableWidget->item(2, 0)->setForeground(QBrush(QColor("#88c0d0")));
-    serialTableWidget->item(2, 0)->setFont(QFont("Arial", 10, QFont::Bold));
+    serialTableWidget->item(2, 0)->setFont(QFont("Arial", 12, QFont::Bold));
     serialTableWidget->item(3, 0)->setText(QString::fromUtf8("角速度(°/s)"));
     serialTableWidget->item(4, 0)->setText(QString::fromUtf8("加速度(g)"));
     serialTableWidget->item(5, 0)->setText(QString::fromUtf8("高精度姿态(°)"));
@@ -2499,12 +2707,12 @@ void MainWindow::setupSerialTab()
     serialTableWidget->item(7, 0)->setText(QString::fromUtf8("四元数 Q"));
     serialTableWidget->item(8, 0)->setText(QString::fromUtf8("--- 位置定位与运动速度 ---"));
     serialTableWidget->item(8, 0)->setForeground(QBrush(QColor("#88c0d0")));
-    serialTableWidget->item(8, 0)->setFont(QFont("Arial", 10, QFont::Bold));
+    serialTableWidget->item(8, 0)->setFont(QFont("Arial", 12, QFont::Bold));
     serialTableWidget->item(9, 0)->setText(QString::fromUtf8("物理位置"));
     serialTableWidget->item(10, 0)->setText(QString::fromUtf8("导航速度(m/s)"));
     serialTableWidget->item(11, 0)->setText(QString::fromUtf8("--- 传感器错误与超量程计数 ---"));
     serialTableWidget->item(11, 0)->setForeground(QBrush(QColor("#88c0d0")));
-    serialTableWidget->item(11, 0)->setFont(QFont("Arial", 10, QFont::Bold));
+    serialTableWidget->item(11, 0)->setFont(QFont("Arial", 12, QFont::Bold));
     serialTableWidget->item(12, 0)->setText(QString::fromUtf8("陀螺超量程"));
     serialTableWidget->item(13, 0)->setText(QString::fromUtf8("加表超量程"));
     serialTableWidget->item(14, 0)->setText(QString::fromUtf8("协议格式"));
@@ -2561,7 +2769,7 @@ void MainWindow::setupSerialTab()
             } else if (c == 0 || (r == 0 && (c == 4 || c == 8)) || (r == 14 && (c == 4 || c == 9))) {
                 it->setBackground(QBrush(QColor("#2e3440")));
                 it->setForeground(QBrush(QColor("#d8dee9")));
-                it->setFont(QFont("Arial", 9, QFont::Bold));
+                it->setFont(QFont("Arial", 11, QFont::Bold));
             } else {
                 it->setBackground(QBrush(QColor("#3b4252")));
                 it->setForeground(QBrush(QColor("#eceff4")));
@@ -2607,7 +2815,7 @@ void MainWindow::setupSerialTab()
     }
 }
 
-QByteArray MainWindow::encodeCommandFrame(double lon, double lat, double alt, double frontLever, double rightLever, double downLever, int validMode, int baudrate, int period, double rollErr, double yawErr, double pitchErr, int userCmd, double alignTime)
+QByteArray MainWindow::encodeCommandFrame(double lon, double lat, double alt, double frontLever, double rightLever, double upLever, int validMode, int baudrate, int period, double rollErr, double yawErr, double pitchErr, int userCmd, double alignTime)
 {
     QByteArray bytes(40, 0);
     // Header
@@ -2619,10 +2827,10 @@ QByteArray MainWindow::encodeCommandFrame(double lon, double lat, double alt, do
     int lonVal = qRound(lon / 0.0000001);
     int latVal = qRound(lat / 0.0000001);
     float altVal = static_cast<float>(alt);
-    float frontVal = static_cast<float>(frontLever);
+    float frontVal = static_cast<float>(frontLever / 0.01);
     unsigned short validVal = static_cast<unsigned short>(validMode);
-    short rightVal = qRound(rightLever);
-    short downVal = qRound(downLever);
+    short upVal = qRound(upLever / 0.01);
+    short rightVal = qRound(rightLever / 0.01);
     unsigned char baudVal = static_cast<unsigned char>(baudrate);
     unsigned char periodVal = static_cast<unsigned char>(period);
     short rollErrVal = qRound(rollErr / 0.006);
@@ -2641,9 +2849,9 @@ QByteArray MainWindow::encodeCommandFrame(double lon, double lat, double alt, do
         ptr[offset+3] = (val >> 24) & 0xFF;
     };
     auto writeFloat = [&](int offset, float val) {
-        union { float f; int i; } u;
-        u.f = val;
-        write32(offset, u.i);
+        int val_i;
+        memcpy(&val_i, &val, sizeof(float));
+        write32(offset, val_i);
     };
     auto write16 = [&](int offset, int val) {
         ptr[offset] = val & 0xFF;
@@ -2655,8 +2863,8 @@ QByteArray MainWindow::encodeCommandFrame(double lon, double lat, double alt, do
     writeFloat(11, altVal);
     writeFloat(15, frontVal);
     write16(19, validVal);
-    write16(21, rightVal);
-    write16(23, downVal);
+    write16(21, upVal);
+    write16(23, rightVal);
     ptr[25] = baudVal;
     ptr[26] = periodVal;
     write16(27, rollErrVal);
@@ -2747,7 +2955,7 @@ void MainWindow::onSerialReadyRead()
     if (!m_serialPort) return;
     m_serialBuffer.append(m_serialPort->readAll());
     
-    while (m_serialBuffer.size() >= 96) {
+    while (m_serialBuffer.size() >= 3) {
         int headerIdx = -1;
         for (int i = 0; i < m_serialBuffer.size() - 1; ++i) {
             if (static_cast<unsigned char>(m_serialBuffer[i]) == 0x55 && 
@@ -2770,15 +2978,50 @@ void MainWindow::onSerialReadyRead()
             m_serialBuffer.remove(0, headerIdx);
         }
         
-        if (m_serialBuffer.size() < 96) {
+        if (m_serialBuffer.size() < 3) {
             break;
         }
         
-        QByteArray packet = m_serialBuffer.left(96);
+        unsigned char lenByte = static_cast<unsigned char>(m_serialBuffer.at(2));
+        int expectedSize = 0;
+        if (lenByte == 0x5C) {
+            expectedSize = 96;
+        } else if (lenByte == 0xFC) {
+            expectedSize = 256;
+        } else {
+            m_serialBuffer.remove(0, 2);
+            continue;
+        }
+        
+        if (m_serialBuffer.size() < expectedSize) {
+            break;
+        }
+        
+        QByteArray packet = m_serialBuffer.left(expectedSize);
         unsigned char *bytes = reinterpret_cast<unsigned char*>(packet.data());
         
-        if (bytes[2] != 92) {
-            m_serialBuffer.remove(0, 2);
+        if (expectedSize == 256) {
+            // Verify 8-bit sum checksum
+            int sum = 0;
+            for (int i = 2; i < 255; ++i) {
+                sum += bytes[i];
+            }
+            if ((sum & 0xFF) != bytes[255]) {
+                m_serialBuffer.remove(0, 2);
+                continue;
+            }
+            
+            // Check DownCMDFeedback is 0xFD44 (little endian 44 FD)
+            if (bytes[3] != 0x44 || bytes[4] != 0xFD) {
+                m_serialBuffer.remove(0, 2);
+                continue;
+            }
+            
+            int blockId = bytes[7];
+            QByteArray blockData = packet.mid(11, 240);
+            showFlashBlockData(blockId, blockData, packet);
+            
+            m_serialBuffer.remove(0, 256);
             continue;
         }
         
@@ -2803,9 +3046,10 @@ void MainWindow::onSerialReadyRead()
             return static_cast<short>(bytes[offset] | (bytes[offset+1] << 8));
         };
         auto readFloat32 = [&](int offset) -> float {
-            union { float f; int i; } u;
-            u.i = readInt32(offset);
-            return u.f;
+            float f;
+            int val = readInt32(offset);
+            memcpy(&f, &val, sizeof(float));
+            return f;
         };
         
         unsigned int pcNum = readInt32(3);
@@ -3009,7 +3253,7 @@ void MainWindow::onSerialReadyRead()
             m_serialBinFile.write(packet);
         }
         
-        m_serialBuffer.remove(0, 96);
+        m_serialBuffer.remove(0, expectedSize);
     }
 }
 
@@ -3028,20 +3272,18 @@ void MainWindow::onSendSerialCommand()
     
     double frontLever = editFrontLever->text().toDouble();
     double rightLever = editRightLever->text().toDouble();
-    double downLever = editDownLever->text().toDouble();
+    double upLever = editUpLever->text().toDouble();
     
     double rollErr = editRollError->text().toDouble();
     double pitchErr = editPitchError->text().toDouble();
     double yawErr = editYawError->text().toDouble();
     
-    int baudIdx = cmbOutBaud->currentIndex();
     int periodIdx = cmbOutPeriod->currentIndex();
     
-    // Baud rate mapping: 0:9600, 6:19200, 1:38400, 7:57600, 2:115200, 3:230400, 4:460800, 5:921600
-    int baudMap[] = { 0, 6, 1, 7, 2, 3, 4, 5 };
     int baudrateVal = 2; // 默认 115200 (2)
-    if (baudIdx >= 0 && baudIdx < 8) {
-        baudrateVal = baudMap[baudIdx];
+    QVariant baudData = cmbOutBaud->currentData();
+    if (baudData.isValid()) {
+        baudrateVal = baudData.toInt();
     }
     int periodVal = periodIdx;
     
@@ -3056,7 +3298,7 @@ void MainWindow::onSendSerialCommand()
     switch (cmdType) {
         case 0: // 自寻北
             userCmdVal = 0x0011;
-            validModeVal = 0x0005; // bit0 LLA, bit2 time valid
+            validModeVal = 0x0000;
             break;
         case 1: // 惯性标定
             userCmdVal = 0x0011;
@@ -3093,21 +3335,75 @@ void MainWindow::onSendSerialCommand()
             yawErrVal = yawErr;
             pitchErrVal = pitchErr;
             break;
+        case 8: // 写入姿态角到导航
+            userCmdVal = 0x00BB;
+            validModeVal = 0x0020; // bit5 valid
+            rollErrVal = rollErr;
+            yawErrVal = yawErr;
+            pitchErrVal = pitchErr;
+            break;
+        case 9: // 写入陀螺零偏
+            userCmdVal = 0x00CC;
+            validModeVal = 0x0040; // bit6 valid
+            rollErrVal = rollErr;
+            yawErrVal = yawErr;
+            pitchErrVal = pitchErr;
+            break;
+        case 10: // 写入杆臂
+            userCmdVal = 0x00DD;
+            validModeVal = 0x0080; // bit7 valid
+            break;
         default:
             break;
     }
     
-    QByteArray cmdBytes = encodeCommandFrame(lon, lat, alt, frontLever, rightLever, downLever, validModeVal, baudrateVal, periodVal, rollErrVal, yawErrVal, pitchErrVal, userCmdVal, alignTimeVal);
+    QByteArray cmdBytes;
+    if (cmdType >= 11 && cmdType <= 13) {
+        cmdBytes.resize(20);
+        cmdBytes.fill(0);
+        cmdBytes[0] = static_cast<char>(0x55);
+        cmdBytes[1] = static_cast<char>(0xAA);
+        cmdBytes[2] = static_cast<char>(0x10);
+        // DownCMD is 0xCD44 (little endian: 44 CD)
+        cmdBytes[3] = static_cast<char>(0x44);
+        cmdBytes[4] = static_cast<char>(0xCD);
+        // Block ID
+        if (cmdType == 11) cmdBytes[7] = static_cast<char>(0x09);
+        else if (cmdType == 12) cmdBytes[7] = static_cast<char>(0x0A);
+        else if (cmdType == 13) cmdBytes[7] = static_cast<char>(0x0B);
+
+        int sum = 0;
+        for (int i = 2; i < 19; ++i) {
+            sum += static_cast<unsigned char>(cmdBytes[i]);
+        }
+        cmdBytes[19] = static_cast<char>(sum & 0xFF);
+    } else {
+        cmdBytes = encodeCommandFrame(lon, lat, alt, frontLever, rightLever, upLever, validModeVal, baudrateVal, periodVal, rollErrVal, yawErrVal, pitchErrVal, userCmdVal, alignTimeVal);
+    }
+
+    QString hexStr = cmdBytes.toHex().toUpper();
+    QString formattedHex;
+    for (int i = 0; i < hexStr.length(); i += 2) {
+        formattedHex.append(hexStr.mid(i, 2) + " ");
+    }
+    formattedHex = formattedHex.trimmed();
+    editSendHex->setText(formattedHex);
+    serialConsoleLog->appendPlainText(QDateTime::currentDateTime().toString("[yyyy-MM-dd hh:mm:ss] ") + QString::fromUtf8("发送 HEX: ") + formattedHex);
     
     m_serialPort->write(cmdBytes);
     m_serialPort->flush();
     
-    m_isWaitingForAck = true;
-    m_lastCommandSentTime = QTime::currentTime();
-    
-    serialConsoleLog->appendPlainText(QDateTime::currentDateTime().toString("[yyyy-MM-dd hh:mm:ss] ") + QString::fromUtf8("发送指令成功：0x%1 (模式 0x%2)")
-                                  .arg(userCmdVal, 4, 16, QChar('0'))
-                                  .arg(validModeVal, 4, 16, QChar('0')).toUpper());
+    if (cmdType >= 11 && cmdType <= 13) {
+        m_isWaitingForAck = false;
+        QString blockName = (cmdType == 11) ? "blk9" : ((cmdType == 12) ? "blk10" : "blk11");
+        serialConsoleLog->appendPlainText(QDateTime::currentDateTime().toString("[yyyy-MM-dd hh:mm:ss] ") + QString::fromUtf8("发送读取指令成功：读取 %1 块配置参数...").arg(blockName));
+    } else {
+        m_isWaitingForAck = true;
+        m_lastCommandSentTime = QTime::currentTime();
+        serialConsoleLog->appendPlainText(QDateTime::currentDateTime().toString("[yyyy-MM-dd hh:mm:ss] ") + QString::fromUtf8("发送指令成功：0x%1 (模式 0x%2)")
+                                      .arg(userCmdVal, 4, 16, QChar('0'))
+                                      .arg(validModeVal, 4, 16, QChar('0')).toUpper());
+    }
 }
 
 void MainWindow::onSaveSerialStateChanged(int state)
@@ -3224,9 +3520,10 @@ void MainWindow::onDecodeBinClicked()
                         return static_cast<short>(bytes[i+offset] | (bytes[i+offset+1] << 8));
                     };
                     auto readFloat32 = [&](int offset) -> float {
-                        union { float f; int i; } u;
-                        u.i = readInt32(offset);
-                        return u.f;
+                        float f;
+                        int val = readInt32(offset);
+                        memcpy(&f, &val, sizeof(float));
+                        return f;
                     };
                     
                     unsigned int pcNum = readInt32(3);
@@ -3306,6 +3603,7 @@ void MainWindow::onRawCmdTypeChanged(int index)
     if (rawCmbCmdType->itemText(index) == QString::fromUtf8("自定义十六进制指令")) {
         rawEditCustomHexCmd->show();
     } else {
+        rawEditCustomHexCmd->clear();
         rawEditCustomHexCmd->hide();
     }
 }
@@ -3320,7 +3618,7 @@ void MainWindow::onSendRawCommand()
     int cmdType = rawCmbCmdType->currentIndex();
     QByteArray cmdBytes;
 
-    if (cmdType == 8) { // 自定义十六进制指令
+    if (cmdType == 11) { // 自定义十六进制指令
         QString hexText = rawEditCustomHexCmd->text().trimmed();
         hexText.replace(" ", "");
         hexText.replace(",", "");
@@ -3355,7 +3653,7 @@ void MainWindow::onSendRawCommand()
         }
         cmdBytes[39] = static_cast<char>(sum & 0xFF);
 
-    } else { // 0 to 7: Standard commands
+    } else { // 0 to 10: Standard commands
         double lon = rawEditLon->text().toDouble();
         double lat = rawEditLat->text().toDouble();
         double alt = rawEditAlt->text().toDouble();
@@ -3364,20 +3662,18 @@ void MainWindow::onSendRawCommand()
         
         double frontLever = rawEditFrontLever->text().toDouble();
         double rightLever = rawEditRightLever->text().toDouble();
-        double downLever = rawEditDownLever->text().toDouble();
+        double upLever = rawEditUpLever->text().toDouble();
         
         double rollErr = rawEditRollError->text().toDouble();
         double pitchErr = rawEditPitchError->text().toDouble();
         double yawErr = rawEditYawError->text().toDouble();
         
-        int baudIdx = rawCmbOutBaud->currentIndex();
         int periodIdx = rawCmbOutPeriod->currentIndex();
         
-        // Baud rate mapping: 0:9600, 6:19200, 1:38400, 7:57600, 2:115200, 3:230400, 4:460800, 5:921600
-        int baudMap[] = { 0, 6, 1, 7, 2, 3, 4, 5 };
         int baudrateVal = 2; // 默认 115200 (2)
-        if (baudIdx >= 0 && baudIdx < 8) {
-            baudrateVal = baudMap[baudIdx];
+        QVariant baudData = rawCmbOutBaud->currentData();
+        if (baudData.isValid()) {
+            baudrateVal = baudData.toInt();
         }
         int periodVal = periodIdx;
         
@@ -3391,7 +3687,7 @@ void MainWindow::onSendRawCommand()
         switch (cmdType) {
             case 0: // 自寻北
                 userCmdVal = 0x0011;
-                validModeVal = 0x0005; // bit0 LLA, bit2 time valid
+                validModeVal = 0x0000;
                 break;
             case 1: // 惯性标定
                 userCmdVal = 0x0011;
@@ -3428,12 +3724,37 @@ void MainWindow::onSendRawCommand()
                 yawErrVal = yawErr;
                 pitchErrVal = pitchErr;
                 break;
+            case 8: // 写入姿态角到导航
+                userCmdVal = 0x00BB;
+                validModeVal = 0x0020; // bit5 valid
+                rollErrVal = rollErr;
+                yawErrVal = yawErr;
+                pitchErrVal = pitchErr;
+                break;
+            case 9: // 写入陀螺零偏
+                userCmdVal = 0x00CC;
+                validModeVal = 0x0040; // bit6 valid
+                rollErrVal = rollErr;
+                yawErrVal = yawErr;
+                pitchErrVal = pitchErr;
+                break;
+            case 10: // 写入杆臂
+                userCmdVal = 0x00DD;
+                validModeVal = 0x0080; // bit7 valid
+                break;
             default:
                 break;
         }
 
-        cmdBytes = encodeCommandFrame(lon, lat, alt, frontLever, rightLever, downLever, validModeVal, baudrateVal, periodVal, rollErrVal, yawErrVal, pitchErrVal, userCmdVal, alignTimeVal);
+        cmdBytes = encodeCommandFrame(lon, lat, alt, frontLever, rightLever, upLever, validModeVal, baudrateVal, periodVal, rollErrVal, yawErrVal, pitchErrVal, userCmdVal, alignTimeVal);
     }
+
+    QString hexStr = cmdBytes.toHex().toUpper();
+    QString formattedHex;
+    for (int i = 0; i < hexStr.length(); i += 2) {
+        formattedHex.append(hexStr.mid(i, 2) + " ");
+    }
+    rawEditSendHex->setText(formattedHex.trimmed());
 
     // Segment into 5 frames (IDs: 0x11 ~ 0x15) and send
     bool allOk = true;
@@ -3454,6 +3775,157 @@ void MainWindow::onSendRawCommand()
     } else {
         QMessageBox::warning(this, "警告", "下发透传指令部分或全部失败，请检查设备连接！");
     }
+}
+
+void MainWindow::showFlashBlockData(int blockId, const QByteArray &blockData, const QByteArray &rawFrame)
+{
+    QString rawHex = rawFrame.toHex().toUpper();
+    QString formattedHex;
+    for (int i = 0; i < rawHex.length(); i += 2) {
+        formattedHex.append(rawHex.mid(i, 2) + " ");
+    }
+    formattedHex = formattedHex.trimmed();
+
+    QString blockName = (blockId == 9) ? "blk9" : ((blockId == 10) ? "blk10" : "blk11");
+    QString blockDesc = (blockId == 9) ? QString::fromUtf8("用户使用参数配置块") : 
+                        ((blockId == 10) ? QString::fromUtf8("IMU零偏配置块") : QString::fromUtf8("用户协议配置项"));
+
+    serialConsoleLog->appendPlainText(QDateTime::currentDateTime().toString("[yyyy-MM-dd hh:mm:ss] ") + 
+                                  QString::fromUtf8("收到 %1 (%2) 读取数据：").arg(blockName).arg(blockDesc));
+    serialConsoleLog->appendPlainText(formattedHex);
+
+    const unsigned char *bData = reinterpret_cast<const unsigned char*>(blockData.constData());
+    auto readInt32 = [&](int offset) -> int {
+        return bData[offset] | (bData[offset+1] << 8) | (bData[offset+2] << 16) | (bData[offset+3] << 24);
+    };
+    auto readUint16 = [&](int offset) -> unsigned short {
+        return bData[offset] | (bData[offset+1] << 8);
+    };
+    auto readFloat32 = [&](int offset) -> float {
+        float f;
+        int val = readInt32(offset);
+        memcpy(&f, &val, sizeof(float));
+        return f;
+    };
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString::fromUtf8("读取结果 - %1 (%2)").arg(blockName).arg(blockDesc));
+    dlg.setMinimumSize(600, 500);
+    dlg.resize(650, 550);
+    dlg.setStyleSheet(
+        "QDialog { background-color: #2e3440; color: #eceff4; }"
+        "QLabel { color: #88c0d0; font-weight: bold; font-size: 14px; }"
+    );
+
+    QVBoxLayout *layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(15, 15, 15, 15);
+    layout->setSpacing(12);
+
+    QLabel *titleLabel = new QLabel(QString::fromUtf8("Flash 块 %1 参数解析结果：").arg(blockName), &dlg);
+    layout->addWidget(titleLabel);
+
+    QTableWidget *table = new QTableWidget(&dlg);
+    table->setColumnCount(4);
+    table->setHorizontalHeaderLabels(QStringList() << QString::fromUtf8("参数名称") << QString::fromUtf8("字段名") << QString::fromUtf8("解析值") << QString::fromUtf8("单位"));
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setStyleSheet(
+        "QTableWidget { background-color: #3b4252; color: #eceff4; gridline-color: #4c566a; font-size: 13px; }"
+        "QHeaderView::section { background-color: #2e3440; color: #88c0d0; padding: 6px; border: 1px solid #4c566a; font-weight: bold; font-size: 13px; }"
+        "QTableWidget::item { padding: 4px; }"
+    );
+
+    struct ParamRow {
+        QString name;
+        QString field;
+        QString value;
+        QString unit;
+    };
+    QList<ParamRow> rows;
+
+    if (blockId == 9) {
+        rows << ParamRow{QString::fromUtf8("滚动安装误差角"), "UsrTransRoll", QString::number(readFloat32(0), 'f', 6), "deg"};
+        rows << ParamRow{QString::fromUtf8("航向安装误差角"), "UsrTransYaw", QString::number(readFloat32(4), 'f', 6), "deg"};
+        rows << ParamRow{QString::fromUtf8("俯仰安装误差角"), "UsrTransPitch", QString::number(readFloat32(8), 'f', 6), "deg"};
+        rows << ParamRow{QString::fromUtf8("前向目标杆臂"), "TargetLeverFront", QString::number(readFloat32(116), 'f', 6), "m"};
+        rows << ParamRow{QString::fromUtf8("上向目标杆臂"), "TargetLeverUp", QString::number(readFloat32(120), 'f', 6), "m"};
+        rows << ParamRow{QString::fromUtf8("左向目标杆臂"), "TargetLeverRight", QString::number(readFloat32(124), 'f', 6), "m"};
+    }
+    else if (blockId == 10) {
+        rows << ParamRow{QString::fromUtf8("X轴陀螺漂移 (前)"), "GyroDriftX", QString::number(readFloat32(0), 'f', 6), "o/h"};
+        rows << ParamRow{QString::fromUtf8("Y轴陀螺漂移 (上)"), "GyroDriftY", QString::number(readFloat32(4), 'f', 6), "o/h"};
+        rows << ParamRow{QString::fromUtf8("Z轴陀螺漂移 (右)"), "GyroDriftZ", QString::number(readFloat32(8), 'f', 6), "o/h"};
+        rows << ParamRow{QString::fromUtf8("X轴加表零偏 (前向)"), "AccelBiasX", QString::number(readFloat32(12), 'f', 6), "m/s2"};
+        rows << ParamRow{QString::fromUtf8("Y轴加表零偏 (上向)"), "AccelBiasY", QString::number(readFloat32(16), 'f', 6), "m/s2"};
+        rows << ParamRow{QString::fromUtf8("Z轴加表零偏 (右向)"), "AccelBiasZ", QString::number(readFloat32(20), 'f', 6), "m/s2"};
+    }
+    else if (blockId == 11) {
+        rows << ParamRow{QString::fromUtf8("对码 (多路配置)"), "MatchCode", QString("0x%1").arg(readUint16(0), 4, 16, QChar('0')).toUpper(), "na"};
+        rows << ParamRow{QString::fromUtf8("用户协议代码"), "ProtocolCode", QString("0x%1").arg(bData[2], 2, 16, QChar('0')).toUpper(), "na"};
+        rows << ParamRow{QString::fromUtf8("波特率"), "BaudRate", QString::number(readInt32(4)), "bps"};
+        rows << ParamRow{QString::fromUtf8("周期数"), "PeriodUs", QString::number(readInt32(8)), "us"};
+        
+        QString alignCond = QString::fromUtf8("未知(%1)").arg(bData[12]);
+        if (bData[12] == 0) alignCond = QString::fromUtf8("不使能待机时间");
+        else if (bData[12] == 2) alignCond = QString::fromUtf8("使能待机时间");
+        rows << ParamRow{QString::fromUtf8("进入对准条件"), "AlignCondition", alignCond, "na"};
+        
+        rows << ParamRow{QString::fromUtf8("待机时间"), "StandbyTime", QString::number(bData[13]), "s"};
+        rows << ParamRow{QString::fromUtf8("粗对准时间"), "CoarseAlignTime", QString::number(readUint16(14) * 0.1, 'f', 1), "s"};
+        rows << ParamRow{QString::fromUtf8("精对准时间"), "FineAlignTime", QString::number(readUint16(18)), "s"};
+        
+        QString speedLimit = bData[31] == 0 ? QString::fromUtf8("不限速") : QString::number(bData[31]);
+        rows << ParamRow{QString::fromUtf8("限速模式"), "SpeedLimit", speedLimit, "m/s"};
+        
+        rows << ParamRow{QString::fromUtf8("基准纬度"), "BaseLati", QString::number(readFloat32(32), 'f', 8), "deg"};
+        rows << ParamRow{QString::fromUtf8("基准高度"), "BaseHgt", QString::number(readFloat32(36), 'f', 3), "m"};
+        rows << ParamRow{QString::fromUtf8("基准经度"), "BaseLogi", QString::number(readFloat32(40), 'f', 8), "deg"};
+        rows << ParamRow{QString::fromUtf8("基准航向"), "BaseHeading", QString::number(readFloat32(44), 'f', 6), "deg"};
+    }
+
+    table->setRowCount(rows.count());
+    for (int i = 0; i < rows.count(); ++i) {
+        table->setItem(i, 0, new QTableWidgetItem(rows[i].name));
+        table->setItem(i, 1, new QTableWidgetItem(rows[i].field));
+        table->setItem(i, 2, new QTableWidgetItem(rows[i].value));
+        table->setItem(i, 3, new QTableWidgetItem(rows[i].unit));
+        
+        for (int c = 0; c < 4; ++c) {
+            table->item(i, c)->setTextAlignment(Qt::AlignCenter);
+            if (c == 2) {
+                table->item(i, c)->setForeground(QBrush(QColor("#8fbcbb")));
+                table->item(i, c)->setFont(QFont("Consolas", 10, QFont::Bold));
+            }
+        }
+    }
+    layout->addWidget(table, 1);
+
+    QLabel *hexLabel = new QLabel(QString::fromUtf8("256字节原始指令返回帧 (RAW HEX)："), &dlg);
+    layout->addWidget(hexLabel);
+
+    QTextEdit *hexEdit = new QTextEdit(&dlg);
+    hexEdit->setReadOnly(true);
+    hexEdit->setPlainText(formattedHex);
+    hexEdit->setStyleSheet(
+        "background-color: #1e222a; color: #eceff4; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; border: 1px solid #4c566a; border-radius: 4px; padding: 5px;"
+    );
+    hexEdit->setMaximumHeight(100);
+    layout->addWidget(hexEdit);
+
+    QHBoxLayout *btnLayout = new QHBoxLayout();
+    btnLayout->addStretch(1);
+    QPushButton *btnOk = new QPushButton(QString::fromUtf8("确定"), &dlg);
+    btnOk->setFixedWidth(100);
+    btnOk->setStyleSheet(
+        "QPushButton { background-color: #5e81ac; color: #eceff4; border-radius: 4px; padding: 6px 12px; font-weight: bold; }"
+        "QPushButton:hover { background-color: #81a1c1; }"
+    );
+    connect(btnOk, &QPushButton::clicked, &dlg, &QDialog::accept);
+    btnLayout->addWidget(btnOk);
+    layout->addLayout(btnLayout);
+
+    dlg.exec();
 }
 
 

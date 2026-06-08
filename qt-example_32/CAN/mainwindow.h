@@ -125,7 +125,7 @@ private:
     QLineEdit *rawEditBindHeading;
     QLineEdit *rawEditFrontLever;
     QLineEdit *rawEditRightLever;
-    QLineEdit *rawEditDownLever;
+    QLineEdit *rawEditUpLever;
     QComboBox *rawCmbOutBaud;
     QComboBox *rawCmbOutPeriod;
     QLineEdit *rawEditRollError;
@@ -133,6 +133,7 @@ private:
     QLineEdit *rawEditYawError;
     QComboBox *rawCmbCmdType;
     QLineEdit *rawEditCustomHexCmd;
+    QLineEdit *rawEditSendHex;
     QPushButton *rawBtnSendCmd;
 
     // 第四阶段新增：数据保存及格式选择组件
@@ -146,6 +147,8 @@ private:
     QFile m_parsedIMUFile;
     QTextStream m_parsedIMUStream;
     QDateTime m_parsedIMUStartTime;
+    bool m_parsedIMUElapsedBaseValid;
+    qint64 m_parsedIMUElapsedBaseMs;
     QFile m_rawFile;
     QTextStream m_rawStream;
     QFile m_rawBinFile; // 追加的原始数据二进制流文件
@@ -156,10 +159,13 @@ private:
     void setupSerialTab();     // 初始化串口控制界面的函数
     void convertDisplayAttitude(double roll, double pitch, double yaw,
                                 double &displayRoll, double &displayPitch, double &displayYaw);
-    void saveParsedIMUSnapshot(UINT canId, UINT channel, const QString &receiveTimeText);
+    void saveParsedIMUSnapshot(UINT canId, UINT channel, const QString &receiveTimeText, qint64 receiveElapsedMs);
+    void stopCANSaveWithWarning(const QString &errorMessage);
+    void stopRawSaveWithWarning(const QString &errorMessage);
     
     // 串口发送指令的底层封包逻辑
-    QByteArray encodeCommandFrame(double lon, double lat, double alt, double frontLever, double rightLever, double downLever, int validMode, int baudrate, int period, double rollErr, double yawErr, double pitchErr, int userCmd, double alignTime);
+    QByteArray encodeCommandFrame(double lon, double lat, double alt, double frontLever, double rightLever, double upLever, int validMode, int baudrate, int period, double rollErr, double yawErr, double pitchErr, int userCmd, double alignTime);
+    void showFlashBlockData(int blockId, const QByteArray &blockData, const QByteArray &rawFrame);
 
 private slots:
     void startRawModeClicked();
@@ -208,10 +214,11 @@ private:
     // 杆臂输入控件
     QLineEdit *editFrontLever;
     QLineEdit *editRightLever;
-    QLineEdit *editDownLever;
+    QLineEdit *editUpLever;
     
     QComboBox *cmbCmdType;
     QPushButton *btnSendSerialCmd;
+    QLineEdit *editSendHex;
     
     CompassWidget *serialCompassWidget;
     AttitudeIndicatorWidget *serialAttitudeWidget;
@@ -227,9 +234,10 @@ private:
     unsigned int m_serialUiUpdateCounter = 0;
 
     bool m_canTimestampBaseValid[2];
-    UINT64 m_canTimestampBaseUs[2];
+    UINT64 m_canTimestampBaseRaw[2];
     QDateTime m_canTimestampBaseHostTime[2];
-    QString formatCANReceiveTime(UINT64 deviceTimestampUs, UINT channel);
+    QString formatCANReceiveTime(UINT64 deviceTimestampRaw, UINT channel);
+    qint64 getCANReceiveElapsedMs(UINT64 deviceTimestampRaw, UINT channel);
 };
 
 #endif // MAINWINDOW_H

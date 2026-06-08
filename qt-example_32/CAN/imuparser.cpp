@@ -1,4 +1,5 @@
 #include "imuparser.h"
+#include <QDebug>
 
 IMUParser* IMUParser::instance = nullptr;
 QMutex IMUParser::mutex;
@@ -9,6 +10,7 @@ IMUParser::IMUParser()
     m_totalRawPackets = 0;
     m_successRawPackets = 0;
     m_failedRawPackets = 0;
+    m_droppedRawPackets = 0;
     m_newRawHexFlag = false;
     memset(m_rawBuffer, 0, 96);
 }
@@ -36,8 +38,8 @@ void IMUParser::parseCANFrame(unsigned int id, const unsigned char* data, unsign
     if (id >= 0x01 && id <= 0x0C) {
         QMutexLocker rawLocker(&m_rawDataMutex);
         
-        // 收到 0x01 时，强制重置接收掩码，作为一包的起始点
-        if (id == 0x01) {
+        // 收到已存在于掩码中的 ID 时，认为上一包数据已经结束，重置接收掩码，作为新包的起始点
+        if (m_rawReceivedMask & (1 << (id - 1))) {
             m_rawReceivedMask = 0;
         }
         
@@ -131,6 +133,7 @@ void IMUParser::parseCANFrame(unsigned int id, const unsigned char* data, unsign
                     packet.decodedData = m_rawData;
                     if (m_rawPacketQueue.size() >= MAX_RAW_PACKET_QUEUE_SIZE) {
                         m_rawPacketQueue.dequeue();
+                        m_droppedRawPackets++;
                     }
                     m_rawPacketQueue.enqueue(packet);
                 } else {
@@ -206,7 +209,8 @@ void IMUParser::parseCANFrame(unsigned int id, const unsigned char* data, unsign
         m_data.platformVarNo = data[1];
         break;
     }
-        default:
+    default:
+        qDebug() << "Received unknown CAN ID for IMU:" << QString::number(id, 16);
         break;
     }
 }
@@ -242,12 +246,19 @@ bool IMUParser::getIMURawHex(QString &hexStr, QString &receiveTimeText)
 
 QList<IMURawPacket> IMUParser::takeIMURawPackets()
 {
+    return takeIMURawPackets(-1);
+}
+
+QList<IMURawPacket> IMUParser::takeIMURawPackets(int maxCount)
+{
     QMutexLocker locker(&m_rawDataMutex);
     QList<IMURawPacket> packets;
-    while (!m_rawPacketQueue.isEmpty()) {
+    while (!m_rawPacketQueue.isEmpty() && (maxCount < 0 || packets.size() < maxCount)) {
         packets.append(m_rawPacketQueue.dequeue());
     }
-    m_newRawHexFlag = false;
+    if (m_rawPacketQueue.isEmpty()) {
+        m_newRawHexFlag = false;
+    }
     return packets;
 }
 
@@ -257,6 +268,15 @@ void IMUParser::getIMURawStats(unsigned int &total, unsigned int &success, unsig
     total = m_totalRawPackets;
     success = m_successRawPackets;
     failed = m_failedRawPackets;
+}
+
+void IMUParser::getIMURawStats(unsigned int &total, unsigned int &success, unsigned int &failed, unsigned int &dropped)
+{
+    QMutexLocker locker(&m_rawDataMutex);
+    total = m_totalRawPackets;
+    success = m_successRawPackets;
+    failed = m_failedRawPackets;
+    dropped = m_droppedRawPackets;
 }
 
 QByteArray IMUParser::getIMURawBytes()

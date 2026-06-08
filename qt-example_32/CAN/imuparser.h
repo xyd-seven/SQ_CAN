@@ -138,9 +138,11 @@ public:
     bool getIMURawHex(QString &hexStr);
     bool getIMURawHex(QString &hexStr, QString &receiveTimeText);
     QList<IMURawPacket> takeIMURawPackets();
+    QList<IMURawPacket> takeIMURawPackets(int maxCount);
     
     // 获取拼包校验统计
     void getIMURawStats(unsigned int &total, unsigned int &success, unsigned int &failed);
+    void getIMURawStats(unsigned int &total, unsigned int &success, unsigned int &failed, unsigned int &dropped);
 
     // 获取当前最新原始二进制数据块
     QByteArray getIMURawBytes();
@@ -161,6 +163,7 @@ private:
     unsigned int m_totalRawPackets;
     unsigned int m_successRawPackets;
     unsigned int m_failedRawPackets;
+    unsigned int m_droppedRawPackets;
     QQueue<IMURawPacket> m_rawPacketQueue;
     QString m_lastRawHexStr;
     QString m_lastRawTimeText;
