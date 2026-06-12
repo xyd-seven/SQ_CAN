@@ -982,7 +982,7 @@ void MainWindow::setupIMUDashboard()
     boxAng->setStyleSheet(cardStyle);
     QGridLayout *gridAng = new QGridLayout(boxAng);
     
-    gridAng->addWidget(new QLabel(QString::fromUtf8("翻滚角 (Roll)"), boxAng), 0, 0);
+    gridAng->addWidget(new QLabel(QString::fromUtf8("倾侧角 (Roll)"), boxAng), 0, 0);
     valRoll = new QLabel("0.00", boxAng);
     valRoll->setStyleSheet(valStyle);
     gridAng->addWidget(valRoll, 0, 1);
@@ -1016,7 +1016,7 @@ void MainWindow::setupIMUDashboard()
                            "QProgressBar::chunk { background: #a3be8c; }");
     gridAng->addWidget(barPitch, 1, 3);
     
-    gridAng->addWidget(new QLabel(QString::fromUtf8("偏航角 (Yaw)"), boxAng), 2, 0);
+    gridAng->addWidget(new QLabel(QString::fromUtf8("方向角 (Yaw)"), boxAng), 2, 0);
     valYaw = new QLabel("0.00", boxAng);
     valYaw->setStyleSheet(valStyle);
     gridAng->addWidget(valYaw, 2, 1);
@@ -1647,9 +1647,9 @@ void MainWindow::setupRawTab()
     rawCmbOutPeriod->setCurrentIndex(1); // 10ms
     rawCmbOutPeriod->setStyleSheet("QComboBox { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 3px; }");
 
-    QLabel *lblRollErr = new QLabel(QString::fromUtf8("滚动安装角(°):"), boxRawCmd); lblRollErr->setStyleSheet(labelStyle);
+    QLabel *lblRollErr = new QLabel(QString::fromUtf8("倾侧安装角(°):"), boxRawCmd); lblRollErr->setStyleSheet(labelStyle);
     rawEditRollError = new QLineEdit(boxRawCmd); rawEditRollError->setStyleSheet(editStyle); rawEditRollError->setPlaceholderText("0.0");
-    QLabel *lblYawErr = new QLabel(QString::fromUtf8("航向安装角(°):"), boxRawCmd); lblYawErr->setStyleSheet(labelStyle);
+    QLabel *lblYawErr = new QLabel(QString::fromUtf8("方向安装角(°):"), boxRawCmd); lblYawErr->setStyleSheet(labelStyle);
     rawEditYawError = new QLineEdit(boxRawCmd); rawEditYawError->setStyleSheet(editStyle); rawEditYawError->setPlaceholderText("0.0");
     QLabel *lblPitchErr = new QLabel(QString::fromUtf8("俯仰安装角(°):"), boxRawCmd); lblPitchErr->setStyleSheet(labelStyle);
     rawEditPitchError = new QLineEdit(boxRawCmd); rawEditPitchError->setStyleSheet(editStyle); rawEditPitchError->setPlaceholderText("0.0");
@@ -2492,9 +2492,9 @@ void MainWindow::setupSerialTab()
     cmbOutPeriod->setStyleSheet("QComboBox { background-color: #3b4252; color: #eceff4; border: 1px solid #4c566a; border-radius: 3px; padding: 3px; }");
 
     // 安装角误差
-    QLabel *lblRollErr = new QLabel(QString::fromUtf8("滚动安装角(°):"), boxCmd); lblRollErr->setStyleSheet(labelStyle);
+    QLabel *lblRollErr = new QLabel(QString::fromUtf8("倾侧安装角(°):"), boxCmd); lblRollErr->setStyleSheet(labelStyle);
     editRollError = new QLineEdit(boxCmd); editRollError->setStyleSheet(editStyle); editRollError->setPlaceholderText("0.0");
-    QLabel *lblYawErr = new QLabel(QString::fromUtf8("航向安装角(°):"), boxCmd); lblYawErr->setStyleSheet(labelStyle);
+    QLabel *lblYawErr = new QLabel(QString::fromUtf8("方向安装角(°):"), boxCmd); lblYawErr->setStyleSheet(labelStyle);
     editYawError = new QLineEdit(boxCmd); editYawError->setStyleSheet(editStyle); editYawError->setPlaceholderText("0.0");
     QLabel *lblPitchErr = new QLabel(QString::fromUtf8("俯仰安装角(°):"), boxCmd); lblPitchErr->setStyleSheet(labelStyle);
     editPitchError = new QLineEdit(boxCmd); editPitchError->setStyleSheet(editStyle); editPitchError->setPlaceholderText("0.0");
@@ -3454,7 +3454,7 @@ void MainWindow::onSaveSerialStateChanged(int state)
             m_serialTxtStream << "时间,工作时间(s),对准时间(总/剩),系统状态,超量程状态,输出通道,命令回复,"
                                  "角速度X(°/s),角速度Y(°/s),角速度Z(°/s),加速度X(g),加速度Y(g),加速度Z(g),"
                                  "纬度(°),经度(°),高程(m),北速度(m/s),天速度(m/s),东速度(m/s),"
-                                 "翻滚角(°),偏航角(°),俯仰角(°),反翻滚角(°),反偏航角(°),反俯仰角(°),"
+                                 "倾侧角(°),方向角(°),俯仰角(°),反倾侧角(°),反方向角(°),反俯仰角(°),"
                                  "陀螺温度(℃),加表温度(℃),四元数Q1,四元数Q2,四元数Q3,四元数Q4,"
                                  "陀螺超量程X,陀螺超量程Y,陀螺超量程Z,加表超量程X,加表超量程Y,加表超量程Z,"
                                  "垂向标志,协议格式\n";

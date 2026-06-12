@@ -66,3 +66,17 @@ desktop.ini
 !qt-example_32/CAN/icons/*.png
 !qt-example_32/CAN/icons/*.ico
 !qt-example_32/CAN/*.dll
+
+# Local-only project materials
+/TOOL/
+/协议文件/
+Agent Rules.md
+
+# qmake / local analysis generated files
+qt-example_32/.qmake.stash
+qt-example_32/CAN/compile_commands.json
+qt-example_32/CAN/CAN_resource.rc
+
+# Local backup files
+qt-example_32/CAN/* old.dll
+qt-example_32/CAN/* old.h
