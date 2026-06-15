@@ -51,6 +51,11 @@ UdsClient::UdsClient(QObject *parent)
 
     // UDS 响应接收自驱动槽连接
     connect(this, &UdsClient::udsResponseReceived, this, &UdsClient::onUdsResponseReceivedSlot);
+
+    // ISO-TP 等待流控帧超时定时器
+    m_fcWaitTimer = new QTimer(this);
+    m_fcWaitTimer->setSingleShot(true);
+    connect(m_fcWaitTimer, &QTimer::timeout, this, &UdsClient::onFcWaitTimeout);
 }
 
 UdsClient::~UdsClient()
@@ -59,6 +64,7 @@ UdsClient::~UdsClient()
     m_rxTimer->stop();
     m_txCfTimer->stop();
     m_udsTimeoutTimer->stop();
+    m_fcWaitTimer->stop();
 }
 
 void UdsClient::setCanThread(CANThread *thread)
@@ -135,15 +141,26 @@ bool UdsClient::writeDataByIdentifier(uint16_t did, const QByteArray &data)
 // 接收底层数据帧入口
 void UdsClient::handleIncomingFrame(uint32_t id, const QByteArray &frameData)
 {
+    Q_UNUSED(id);
     if (frameData.isEmpty()) return;
 
     uint8_t pci = frameData.at(0) & 0xF0;
 
     // 1. 单帧 (SF)
     if (pci == 0x00) {
-        int len = frameData.at(0) & 0x0F;
-        if (len > 0 && len <= frameData.size() - 1) {
-            QByteArray udsPayload = frameData.mid(1, len);
+        int len = 0;
+        int pciLen = frameData.at(0) & 0x0F;
+        int payloadOffset = 1;
+        if (pciLen == 0) {
+            if (frameData.size() >= 2) {
+                len = static_cast<uint8_t>(frameData.at(1));
+                payloadOffset = 2;
+            }
+        } else {
+            len = pciLen;
+        }
+        if (len > 0 && len <= frameData.size() - payloadOffset) {
+            QByteArray udsPayload = frameData.mid(payloadOffset, len);
             m_rxState = RX_IDLE;
             m_rxTimer->stop();
             handleUdsResponse(udsPayload);
@@ -151,6 +168,10 @@ void UdsClient::handleIncomingFrame(uint32_t id, const QByteArray &frameData)
     }
     // 2. 首帧 (FF)
     else if (pci == 0x10) {
+        if (frameData.size() < 2) {
+            emit logMessage("ISO-TP 错误: 接收首帧长度小于 2 字节", 3);
+            return;
+        }
         int len = ((frameData.at(0) & 0x0F) << 8) | static_cast<uint8_t>(frameData.at(1));
         m_rxBuffer = frameData.mid(2);
         m_rxTotalLen = len;
@@ -164,6 +185,7 @@ void UdsClient::handleIncomingFrame(uint32_t id, const QByteArray &frameData)
     // 3. 连续帧 (CF)
     else if (pci == 0x20) {
         if (m_rxState != RX_WAIT_CF) return;
+        if (frameData.size() < 1) return;
 
         uint8_t sn = frameData.at(0) & 0x0F;
         if (sn != m_rxExpectedSn) {
@@ -173,7 +195,8 @@ void UdsClient::handleIncomingFrame(uint32_t id, const QByteArray &frameData)
             return;
         }
 
-        int bytesToCopy = qMin(7, m_rxTotalLen - m_rxBuffer.size());
+        int maxCfPayload = frameData.size() - 1;
+        int bytesToCopy = qMin(maxCfPayload, m_rxTotalLen - m_rxBuffer.size());
         m_rxBuffer.append(frameData.mid(1, bytesToCopy));
         m_rxExpectedSn = (m_rxExpectedSn + 1) & 0x0F;
 
@@ -188,6 +211,12 @@ void UdsClient::handleIncomingFrame(uint32_t id, const QByteArray &frameData)
     // 4. 流控帧 (FC)
     else if (pci == 0x30) {
         if (m_txState != TX_WAIT_FC) return;
+        if (frameData.size() < 3) {
+            emit logMessage("ISO-TP 错误: 接收流控帧长度小于 3 字节，忽略该帧", 3);
+            return;
+        }
+
+        m_fcWaitTimer->stop(); // 停止流控帧等待计时器
 
         uint8_t fs = frameData.at(0) & 0x0F;
         if (fs == 0) { // Continue to Send
@@ -207,7 +236,8 @@ void UdsClient::handleIncomingFrame(uint32_t id, const QByteArray &frameData)
             m_cfSentInBlock = 0;
             m_txCfTimer->start(stMinMs);
         } else if (fs == 1) { // Wait
-            // 继续等待，重启超时定时器或等待下一个 FC
+            // 继续等待，重启流控等待定时器，继续等下一个 FC 帧
+            m_fcWaitTimer->start(1000);
             emit logMessage("ISO-TP 提示: 接收到 FlowControl WAIT，继续等待...", 0);
         } else { // Overflow/Error
             emit logMessage("ISO-TP 错误: 接收到 FlowControl 溢出，发送中止", 3);
@@ -240,7 +270,6 @@ void UdsClient::handleUdsResponse(const QByteArray &udsPayload)
     if (isPositive) {
         emit logMessage(QString("RX <- 0x%1: %2").arg(m_responseID, 0, 16).arg(hexStr.trimmed()), 2);
     } else {
-        uint8_t reqService = (udsPayload.size() > 1) ? udsPayload.at(1) : 0x00;
         uint8_t nrc = (udsPayload.size() > 2) ? udsPayload.at(2) : 0x00;
         
         // 专门处理 Response Pending 延迟响应 (NRC 0x78)
@@ -284,13 +313,16 @@ void UdsClient::handleUdsResponse(const QByteArray &udsPayload)
 // ISO-TP 消息传送入口
 void UdsClient::transmitIsoTpMessage(const QByteArray &message)
 {
-    if (message.size() <= 7) {
+    int maxSfLen = (m_protocol == 1) ? 62 : 7;
+    if (message.size() <= maxSfLen) {
         sendSingleFrame(message);
     } else {
         m_txBuffer = message;
-        m_txIndex = 6; // 首帧包含前 6 字节
+        int ffPayloadLen = (m_protocol == 1) ? 62 : 6;
+        m_txIndex = ffPayloadLen; // 首帧包含前 ffPayloadLen 字节
         m_txExpectedSn = 1;
         m_txState = TX_WAIT_FC;
+        m_fcWaitTimer->start(1000); // 开启等待流控帧 N_Bs 1s 定时器
         sendFirstFrame(message);
     }
 }
@@ -298,25 +330,40 @@ void UdsClient::transmitIsoTpMessage(const QByteArray &message)
 // 发送单帧 (SF)
 void UdsClient::sendSingleFrame(const QByteArray &payload)
 {
-    char data[8];
-    memset(data, 0, 8);
-    data[0] = static_cast<char>(payload.size() & 0x0F);
-    memcpy(data + 1, payload.constData(), payload.size());
+    int maxSize = getMaxFrameSize();
+    QVector<char> data(maxSize, 0);
     
-    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data, 8);
+    if (m_protocol == 1) { // CANFD
+        if (payload.size() <= 7) {
+            data[0] = static_cast<char>(payload.size() & 0x0F);
+            memcpy(data.data() + 1, payload.constData(), payload.size());
+        } else {
+            data[0] = 0x00;
+            data[1] = static_cast<char>(payload.size() & 0xFF);
+            memcpy(data.data() + 2, payload.constData(), payload.size());
+        }
+    } else { // Classic CAN
+        data[0] = static_cast<char>(payload.size() & 0x0F);
+        memcpy(data.data() + 1, payload.constData(), payload.size());
+    }
+    
+    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data.constData(), maxSize);
 }
 
 // 发送首帧 (FF)
 void UdsClient::sendFirstFrame(const QByteArray &payload)
 {
-    char data[8];
-    memset(data, 0, 8);
+    int maxSize = getMaxFrameSize();
+    QVector<char> data(maxSize, 0);
     int len = payload.size();
+    
     data[0] = static_cast<char>(0x10 | ((len >> 8) & 0x0F));
     data[1] = static_cast<char>(len & 0xFF);
-    memcpy(data + 2, payload.constData(), 6);
+    
+    int ffPayloadLen = (m_protocol == 1) ? 62 : 6;
+    memcpy(data.data() + 2, payload.constData(), qMin(payload.size(), ffPayloadLen));
 
-    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data, 8);
+    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data.constData(), maxSize);
 }
 
 // 发送连续帧 (CF)
@@ -324,15 +371,16 @@ void UdsClient::sendConsecutiveFrame()
 {
     if (m_txState != TX_SENDING_CF) return;
 
-    char data[8];
-    memset(data, 0, 8);
+    int maxSize = getMaxFrameSize();
+    QVector<char> data(maxSize, 0);
     data[0] = static_cast<char>(0x20 | (m_txExpectedSn & 0x0F));
 
     int bytesLeft = m_txBuffer.size() - m_txIndex;
-    int bytesToCopy = qMin(7, bytesLeft);
-    memcpy(data + 1, m_txBuffer.constData() + m_txIndex, bytesToCopy);
+    int maxCfPayloadLen = maxSize - 1; // 7 for Classic CAN, 63 for CAN-FD
+    int bytesToCopy = qMin(maxCfPayloadLen, bytesLeft);
+    memcpy(data.data() + 1, m_txBuffer.constData() + m_txIndex, bytesToCopy);
     
-    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data, 8);
+    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data.constData(), maxSize);
 
     m_txIndex += bytesToCopy;
     m_txExpectedSn = (m_txExpectedSn + 1) & 0x0F;
@@ -347,7 +395,7 @@ void UdsClient::sendConsecutiveFrame()
         if (m_fcBs > 0 && m_cfSentInBlock >= m_fcBs) {
             m_txState = TX_WAIT_FC;
             m_txCfTimer->stop();
-            // 在此状态下，它会停止发送，直到下一个 FC 帧到达
+            m_fcWaitTimer->start(1000); // 开启等待流控帧 N_Bs 1s 定时器
         } else {
             // 继续发送下一个 CF
             int stMinMs = 0;
@@ -365,27 +413,27 @@ void UdsClient::sendConsecutiveFrame()
 // 发送流控帧 (FC)
 void UdsClient::sendFlowControl(uint8_t flowStatus, uint8_t blockSize, uint8_t stMin)
 {
-    char data[8];
-    memset(data, 0, 8);
+    int maxSize = getMaxFrameSize();
+    QVector<char> data(maxSize, 0);
     data[0] = static_cast<char>(0x30 | (flowStatus & 0x0F));
     data[1] = static_cast<char>(blockSize);
     data[2] = static_cast<char>(stMin);
 
-    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data, 8);
+    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data.constData(), maxSize);
 }
 
 // Tester Present 心跳超时槽函数
 void UdsClient::onTesterPresentTimeout()
 {
     if (!m_canThread) return;
-    // 发送 0x3E 80 (在线保持，抑制响应)
-    char data[8];
-    memset(data, 0, 8);
+    
+    int maxSize = getMaxFrameSize();
+    QVector<char> data(maxSize, 0);
     data[0] = 0x02; // SF Length = 2
     data[1] = 0x3E; // Service ID
     data[2] = 0x80; // Sub-function: Suppress response
 
-    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data, 8);
+    m_canThread->sendData(m_requestID, m_isExtended ? 1 : 0, m_protocol, 0, m_channel, data.constData(), maxSize);
 }
 
 // ISO-TP 接收连续帧超时槽
@@ -417,6 +465,21 @@ void UdsClient::onUdsResponseTimeout()
     }
 }
 
+// 等待流控帧超时槽 (N_Bs Timeout)
+void UdsClient::onFcWaitTimeout()
+{
+    if (m_txState == TX_WAIT_FC) {
+        m_txState = TX_IDLE;
+        emit logMessage("ISO-TP 错误: 等待流控帧 (FC) 超时！(N_Bs Timeout)", 3);
+        
+        if (m_upgradeRunning) {
+            m_upgradeRunning = false;
+            emit upgradeCompleted(false, "等待流控帧 (FC) 回复超时");
+            transitionUpgradeState(UPG_IDLE);
+        }
+    }
+}
+
 // ---------------------- 固件升级状态机 ----------------------
 
 bool UdsClient::startUpgrade(const QByteArray &firmwareData, uint32_t startAddress)
@@ -433,6 +496,11 @@ bool UdsClient::startUpgrade(const QByteArray &firmwareData, uint32_t startAddre
     m_upgradeBlockCounter = 1;
     m_upgradeRunning = true;
     m_upgradeBlockSize = 256; // 默认传输块大小为 256 字节，可在 0x34 响应中由 ECU 给出
+
+    if (m_testerPresentEnabled) {
+        m_testerPresentTimer->stop();
+        emit logMessage("固件升级期间临时暂停 Tester Present (0x3E) 心跳", 0);
+    }
 
     emit logMessage("=== 启动自动固件升级流程 ===", 0);
     transitionUpgradeState(UPG_ENTER_EXTENDED);
@@ -468,6 +536,14 @@ void UdsClient::transitionUpgradeState(UpgradeState newState)
     }
     emit upgradeStateChanged(stateName);
     
+    if (m_upgradeState == UPG_IDLE || m_upgradeState == UPG_COMPLETED) {
+        m_fcWaitTimer->stop(); // 确保停止流控帧超时器
+        if (m_testerPresentEnabled) {
+            m_testerPresentTimer->start(m_testerPresentInterval);
+            emit logMessage("固件升级结束，恢复 Tester Present (0x3E) 心跳", 0);
+        }
+    }
+
     if (m_upgradeState != UPG_IDLE && m_upgradeState != UPG_COMPLETED) {
         // 执行当前状态对应的 UDS 诊断指令
         runUpgradeStateMachine();
@@ -552,8 +628,18 @@ void UdsClient::runUpgradeStateMachine()
             
         case UPG_CHECKSUM_VERIFY: {
             // 步骤 8: 校验固件 (31) 
-            // 格式: 31 01 (启动例程) + 02 02 (假设为自检例程 DID)
-            sendUdsRequest(0x31, QByteArray::fromHex("010202"));
+            // 格式: 31 01 (启动例程) + 02 02 (自检例程 DID) + CRC32 (4字节)
+            uint32_t crcVal = calculateCrc32(m_firmwareData);
+            QByteArray payload = QByteArray::fromHex("010202");
+            payload.append(static_cast<char>((crcVal >> 24) & 0xFF));
+            payload.append(static_cast<char>((crcVal >> 16) & 0xFF));
+            payload.append(static_cast<char>((crcVal >> 8) & 0xFF));
+            payload.append(static_cast<char>(crcVal & 0xFF));
+            
+            emit logMessage(QString("固件升级: 发送例程校验命令 31 01 02 02，附加 CRC32=0x%1")
+                            .arg(crcVal, 8, 16, QChar('0')).toUpper(), 0);
+            
+            sendUdsRequest(0x31, payload);
             break;
         }
         case UPG_ECU_RESET:
@@ -577,6 +663,7 @@ void UdsClient::runUpgradeStateMachine()
 // 重载的 UDS 应用层协议自驱动转换点
 void UdsClient::onUdsResponseReceivedSlot(uint8_t serviceId, bool isPositive, const QByteArray &payload, uint8_t nrc)
 {
+    Q_UNUSED(serviceId);
     Q_UNUSED(nrc);
     if (!m_upgradeRunning) return;
 
@@ -673,4 +760,26 @@ void UdsClient::onUdsResponseReceivedSlot(uint8_t serviceId, bool isPositive, co
         default:
             break;
     }
+}
+
+int UdsClient::getMaxFrameSize() const
+{
+    return m_protocol == 1 ? 64 : 8;
+}
+
+uint32_t UdsClient::calculateCrc32(const QByteArray &data) const
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (int i = 0; i < data.size(); ++i) {
+        uint8_t byte = static_cast<uint8_t>(data.at(i));
+        crc ^= byte;
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return ~crc;
 }

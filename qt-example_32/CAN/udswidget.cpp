@@ -709,15 +709,24 @@ void UdsWidget::onFlowTimerTimeout()
 
     // 执行当前步骤
     m_flowTable->selectRow(m_flowCurrentIndex);
-    QString name = m_flowTable->item(m_flowCurrentIndex, 1)->text();
-    QString pduStr = m_flowTable->item(m_flowCurrentIndex, 2)->text().replace(" ", "");
+    QTableWidgetItem *nameItem = m_flowTable->item(m_flowCurrentIndex, 1);
+    QTableWidgetItem *pduItem = m_flowTable->item(m_flowCurrentIndex, 2);
+    QTableWidgetItem *statusItem = m_flowTable->item(m_flowCurrentIndex, 4);
+    if (!nameItem || !pduItem || !statusItem) {
+        onLogMessage(QString("自动化流程错误: 步骤 %1 数据单元损坏").arg(m_flowCurrentIndex + 1), 3);
+        m_flowCurrentIndex++;
+        m_flowTimer->start(m_intervalSpin->value());
+        return;
+    }
+    QString name = nameItem->text();
+    QString pduStr = pduItem->text().replace(" ", "");
 
     if (name.contains(QString::fromUtf8("延时")) || name.contains("Delay")) {
         int delayVal = pduStr.toInt();
         if (delayVal <= 0) delayVal = 1000;
         
-        m_flowTable->item(m_flowCurrentIndex, 4)->setText(QString::fromUtf8("延时中"));
-        m_flowTable->item(m_flowCurrentIndex, 4)->setForeground(QBrush(QColor("#ebcb8b")));
+        statusItem->setText(QString::fromUtf8("延时中"));
+        statusItem->setForeground(QBrush(QColor("#ebcb8b")));
         
         onLogMessage(QString("步骤 %1: 延时等待 %2 ms...").arg(m_flowCurrentIndex + 1).arg(delayVal), 0);
         
@@ -727,15 +736,15 @@ void UdsWidget::onFlowTimerTimeout()
         // UDS 诊断指令发送
         QByteArray pdu = QByteArray::fromHex(pduStr.toUtf8());
         if (pdu.isEmpty()) {
-            m_flowTable->item(m_flowCurrentIndex, 4)->setText(QString::fromUtf8("错误"));
-            m_flowTable->item(m_flowCurrentIndex, 4)->setForeground(QBrush(QColor("#bf616a")));
+            statusItem->setText(QString::fromUtf8("错误"));
+            statusItem->setForeground(QBrush(QColor("#bf616a")));
             m_flowCurrentIndex++;
             m_flowTimer->start(m_intervalSpin->value());
             return;
         }
 
-        m_flowTable->item(m_flowCurrentIndex, 4)->setText(QString::fromUtf8("发送中"));
-        m_flowTable->item(m_flowCurrentIndex, 4)->setForeground(QBrush(QColor("#ebcb8b")));
+        statusItem->setText(QString::fromUtf8("发送中"));
+        statusItem->setForeground(QBrush(QColor("#ebcb8b")));
 
         uint8_t service = pdu.at(0);
         m_udsClient->sendUdsRequest(service, pdu.mid(1));
@@ -769,15 +778,19 @@ void UdsWidget::onUdsResponseReceived(uint8_t serviceId, bool isPositive, const 
 
     // 如果是自动化执行列表中
     if (m_flowRunning && m_flowCurrentIndex < m_flowTable->rowCount()) {
-        m_flowTable->item(m_flowCurrentIndex, 3)->setText(hexStr);
+        QTableWidgetItem *resItem = m_flowTable->item(m_flowCurrentIndex, 3);
+        if (resItem) {
+            resItem->setText(hexStr);
+        }
         QTableWidgetItem *statusItem = m_flowTable->item(m_flowCurrentIndex, 4);
-        
-        if (isPositive) {
-            statusItem->setText(QString::fromUtf8("成功"));
-            statusItem->setForeground(QBrush(QColor("#a3be8c")));
-        } else {
-            statusItem->setText(QString("错误 (0x%1)").arg(nrc, 2, 16, QChar('0')).toUpper());
-            statusItem->setForeground(QBrush(QColor("#bf616a")));
+        if (statusItem) {
+            if (isPositive) {
+                statusItem->setText(QString::fromUtf8("成功"));
+                statusItem->setForeground(QBrush(QColor("#a3be8c")));
+            } else {
+                statusItem->setText(QString("错误 (0x%1)").arg(nrc, 2, 16, QChar('0')).toUpper());
+                statusItem->setForeground(QBrush(QColor("#bf616a")));
+            }
         }
 
         m_flowCurrentIndex++;
@@ -794,10 +807,15 @@ void UdsWidget::onUdsResponseTimeout()
     updateStats();
 
     if (m_flowRunning && m_flowCurrentIndex < m_flowTable->rowCount()) {
-        m_flowTable->item(m_flowCurrentIndex, 3)->setText("TIMEOUT");
+        QTableWidgetItem *resItem = m_flowTable->item(m_flowCurrentIndex, 3);
+        if (resItem) {
+            resItem->setText("TIMEOUT");
+        }
         QTableWidgetItem *statusItem = m_flowTable->item(m_flowCurrentIndex, 4);
-        statusItem->setText(QString::fromUtf8("超时"));
-        statusItem->setForeground(QBrush(QColor("#bf616a")));
+        if (statusItem) {
+            statusItem->setText(QString::fromUtf8("超时"));
+            statusItem->setForeground(QBrush(QColor("#bf616a")));
+        }
 
         m_flowCurrentIndex++;
         m_flowTimer->start(m_intervalSpin->value());
@@ -809,7 +827,7 @@ void UdsWidget::onUdsResponseTimeout()
 // 游览并选择固件文件
 void UdsWidget::onBrowseFileClicked()
 {
-    QString filePath = QFileDialog::getOpenFileName(this, QString::fromUtf8("选择固件文件"), "", "Binary Files (*.bin);;Hex Files (*.hex);;All Files (*)");
+    QString filePath = QFileDialog::getOpenFileName(this, QString::fromUtf8("选择固件文件"), "", "Binary Files (*.bin);;All Files (*)");
     if (!filePath.isEmpty()) {
         m_filePathEdit->setText(filePath);
         onLogMessage(QString("已选择固件文件: %1").arg(filePath), 0);

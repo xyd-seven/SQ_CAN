@@ -55,6 +55,7 @@ private slots:
     void onTxCfTimerTimeout();
     void onUdsResponseTimeout();
     void onUdsResponseReceivedSlot(uint8_t serviceId, bool isPositive, const QByteArray &payload, uint8_t nrc);
+    void onFcWaitTimeout();
 
 private:
     // ISO-TP 发送辅助方法
@@ -87,6 +88,8 @@ private:
     void runUpgradeStateMachine();
     void transitionUpgradeState(UpgradeState newState);
     uint32_t calculateKey(uint32_t seed);
+    int getMaxFrameSize() const;
+    uint32_t calculateCrc32(const QByteArray &data) const;
 
     // 成员变量
     CANThread *m_canThread;
@@ -126,6 +129,7 @@ private:
     uint8_t m_fcStMin;    // 最小间隔 (STmin)
     int m_cfSentInBlock;  // 当前块中已发送的连续帧数
     QTimer *m_txCfTimer;
+    QTimer *m_fcWaitTimer;
 
     // UDS 请求/响应状态
     bool m_waitingForUdsResponse;
