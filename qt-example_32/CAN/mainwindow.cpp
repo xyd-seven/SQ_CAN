@@ -1707,6 +1707,9 @@ void MainWindow::setupRawTab()
         << QString::fromUtf8("写入姿态角转导航至Flash (0x00BB)")
         << QString::fromUtf8("写入陀螺零偏至Flash (0x00CC)")
         << QString::fromUtf8("写入杆臂至Flash (0x00DD)")
+        << QString::fromUtf8("读取用户使用参数配置 (0xCD44, blk9)")
+        << QString::fromUtf8("读取IMU零偏配置 (0xCD44, blk10)")
+        << QString::fromUtf8("读取用户协议配置 (0xCD44, blk11)")
         << QString::fromUtf8("自定义十六进制指令")
     );
     rawCmbCmdType->setView(new QListView(this));
@@ -3697,7 +3700,7 @@ void MainWindow::onSendRawCommand()
     int cmdType = rawCmbCmdType->currentIndex();
     QByteArray cmdBytes;
 
-    if (cmdType == 11) { // 自定义十六进制指令
+    if (rawCmbCmdType->itemText(cmdType) == QString::fromUtf8("自定义十六进制指令")) { // 自定义十六进制指令
         QString hexText = rawEditCustomHexCmd->text().trimmed();
         hexText.replace(" ", "");
         hexText.replace(",", "");
@@ -3716,22 +3719,26 @@ void MainWindow::onSendRawCommand()
             QMessageBox::warning(this, "错误", "十六进制串不能为空！");
             return;
         }
+    } else if (cmdType >= 11 && cmdType <= 13) {
+        // 读取配置参数 blk9、blk10、blk11，发送 0xCD44 20字节格式指令
+        cmdBytes.resize(20);
+        cmdBytes.fill(0);
+        cmdBytes[0] = static_cast<char>(0x55);
+        cmdBytes[1] = static_cast<char>(0xAA);
+        cmdBytes[2] = static_cast<char>(0x10);
+        // DownCMD is 0xCD44 (little endian: 44 CD)
+        cmdBytes[3] = static_cast<char>(0x44);
+        cmdBytes[4] = static_cast<char>(0xCD);
+        // Block ID
+        if (cmdType == 11) cmdBytes[7] = static_cast<char>(0x09);
+        else if (cmdType == 12) cmdBytes[7] = static_cast<char>(0x0A);
+        else if (cmdType == 13) cmdBytes[7] = static_cast<char>(0x0B);
 
-        // Pad or truncate to 40 bytes
-        if (cmdBytes.size() > 40) {
-            cmdBytes.truncate(40);
-        } else if (cmdBytes.size() < 40) {
-            cmdBytes.append(40 - cmdBytes.size(), 0);
-        }
-
-        // Recalculate checksum at index 39: sum of index 2 to 38
         int sum = 0;
-        unsigned char *ptr = reinterpret_cast<unsigned char*>(cmdBytes.data());
-        for (int i = 2; i < 39; ++i) {
-            sum += ptr[i];
+        for (int i = 2; i < 19; ++i) {
+            sum += static_cast<unsigned char>(cmdBytes[i]);
         }
-        cmdBytes[39] = static_cast<char>(sum & 0xFF);
-
+        cmdBytes[19] = static_cast<char>(sum & 0xFF);
     } else { // 0 to 10: Standard commands
         double lon = rawEditLon->text().toDouble();
         double lat = rawEditLat->text().toDouble();
@@ -3857,13 +3864,18 @@ void MainWindow::onSendRawCommand()
         return;
     }
 
-    // Segment into 5 frames (IDs: 0x11 ~ 0x15) and send
+    // Segment into frames by actual length and send
+    int totalLen = cmdBytes.size();
+    int numFrames = (totalLen + 7) / 8;
     bool allOk = true;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < numFrames; ++i) {
         UINT id = 0x11 + i;
+        int remaining = totalLen - (i * 8);
+        int frameLen = qMin(8, remaining);
         char frameData[8];
-        memcpy(frameData, cmdBytes.constData() + (i * 8), 8);
-        bool ok = canthread->sendData(id, 0, 0, 0, 0, frameData, 8);
+        memset(frameData, 0, 8);
+        memcpy(frameData, cmdBytes.constData() + (i * 8), frameLen);
+        bool ok = canthread->sendData(id, 0, 0, 0, 0, frameData, frameLen);
         if (!ok) {
             allOk = false;
         }
