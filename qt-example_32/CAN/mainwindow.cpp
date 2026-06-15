@@ -28,6 +28,9 @@ MainWindow::MainWindow(QWidget *parent) :
 {
     udsWidget = nullptr;
     m_isWaitingForAck = false;
+    m_isReceivingCanBlock = false;
+    m_canBlockReceivedMask = 0;
+    memset(m_canBlockBuffer, 0, 256);
     for (int i = 0; i < 2; ++i) {
         m_canTimestampBaseValid[i] = false;
         m_canTimestampBaseRaw[i] = 0;
@@ -464,11 +467,62 @@ void MainWindow::canRecvedCANData(QVector<ZCAN_Receive_Data> recvCANData,UINT fr
             udsWidget->udsClient()->handleIncomingFrame(can_id, data);
         }
         
-        // 馈给姿传感器解析
         QString receiveTimeText = formatCANReceiveTime(recvCANData[i].timestamp, channel);
         qint64 receiveElapsedMs = getCANReceiveElapsedMs(recvCANData[i].timestamp, channel);
-        IMUParser::getInstance()->parseCANFrame(can_id, recvCANData[i].frame.data, recvCANData[i].frame.can_dlc, receiveTimeText);
-        saveParsedIMUSnapshot(can_id, channel, receiveTimeText, receiveElapsedMs);
+
+        // --- 开始新添加的 CAN 块读取拼包逻辑 ---
+        bool skipIMUParser = false;
+        if (can_id == 0x01) {
+            if (recvCANData[i].frame.can_dlc >= 3) {
+                unsigned char lenByte = recvCANData[i].frame.data[2];
+                if (lenByte == 0xFC) { // 256 字节块配置返回包
+                    m_isReceivingCanBlock = true;
+                    m_canBlockReceivedMask = 0;
+                    memset(m_canBlockBuffer, 0, 256);
+                    int copyLen = qMin(8, (int)recvCANData[i].frame.can_dlc);
+                    memcpy(m_canBlockBuffer, recvCANData[i].frame.data, copyLen);
+                    m_canBlockReceivedMask |= (1 << 0);
+                    skipIMUParser = true;
+                } else if (lenByte == 0x5C) { // 96 字节普通原始数据包
+                    m_isReceivingCanBlock = false;
+                }
+            }
+        } else if (can_id >= 0x02 && can_id <= 0x20) {
+            if (m_isReceivingCanBlock) {
+                int offset = (can_id - 1) * 8;
+                int copyLen = qMin(8, (int)recvCANData[i].frame.can_dlc);
+                memcpy(m_canBlockBuffer + offset, recvCANData[i].frame.data, copyLen);
+                m_canBlockReceivedMask |= (1 << (can_id - 1));
+                skipIMUParser = true;
+                
+                if (m_canBlockReceivedMask == 0xFFFFFFFF) {
+                    m_isReceivingCanBlock = false;
+                    // 拼包完成，进行校验与展示
+                    // 256 字节的最后一字节是校验和
+                    int sum = 0;
+                    for (int k = 2; k < 255; ++k) {
+                        sum += m_canBlockBuffer[k];
+                    }
+                    if ((sum & 0xFF) == m_canBlockBuffer[255]) {
+                        // 确保 DownCMDFeedback 是 0xFD44
+                        if (m_canBlockBuffer[3] == 0x44 && m_canBlockBuffer[4] == 0xFD) {
+                            int blockId = m_canBlockBuffer[7];
+                            QByteArray blockData((const char*)m_canBlockBuffer + 11, 240);
+                            QByteArray rawFrame((const char*)m_canBlockBuffer, 256);
+                            // 在 GUI 线程中调用弹窗解析和控制台打印
+                            showFlashBlockData(blockId, blockData, rawFrame);
+                        }
+                    }
+                }
+            }
+        }
+        // --- 结束 CAN 块读取拼包逻辑 ---
+
+        // 馈给姿传感器解析
+        if (!skipIMUParser) {
+            IMUParser::getInstance()->parseCANFrame(can_id, recvCANData[i].frame.data, recvCANData[i].frame.can_dlc, receiveTimeText);
+            saveParsedIMUSnapshot(can_id, channel, receiveTimeText, receiveElapsedMs);
+        }
 
         messageList.clear();
         messageList << receiveTimeText;//时间
@@ -505,11 +559,62 @@ void MainWindow::canRecvedCANFDData(QVector<ZCAN_ReceiveFD_Data> recvCANFDData,U
             udsWidget->udsClient()->handleIncomingFrame(can_id, data);
         }
 
-        // 馈给姿传感器解析
         QString receiveTimeText = formatCANReceiveTime(recvCANFDData[i].timestamp, channel);
         qint64 receiveElapsedMs = getCANReceiveElapsedMs(recvCANFDData[i].timestamp, channel);
-        IMUParser::getInstance()->parseCANFrame(can_id, recvCANFDData[i].frame.data, recvCANFDData[i].frame.len, receiveTimeText);
-        saveParsedIMUSnapshot(can_id, channel, receiveTimeText, receiveElapsedMs);
+
+        // --- 开始新添加的 CAN 块读取拼包逻辑 ---
+        bool skipIMUParser = false;
+        if (can_id == 0x01) {
+            if (recvCANFDData[i].frame.len >= 3) {
+                unsigned char lenByte = recvCANFDData[i].frame.data[2];
+                if (lenByte == 0xFC) { // 256 字节块配置返回包
+                    m_isReceivingCanBlock = true;
+                    m_canBlockReceivedMask = 0;
+                    memset(m_canBlockBuffer, 0, 256);
+                    int copyLen = qMin(8, (int)recvCANFDData[i].frame.len);
+                    memcpy(m_canBlockBuffer, recvCANFDData[i].frame.data, copyLen);
+                    m_canBlockReceivedMask |= (1 << 0);
+                    skipIMUParser = true;
+                } else if (lenByte == 0x5C) { // 96 字节普通原始数据包
+                    m_isReceivingCanBlock = false;
+                }
+            }
+        } else if (can_id >= 0x02 && can_id <= 0x20) {
+            if (m_isReceivingCanBlock) {
+                int offset = (can_id - 1) * 8;
+                int copyLen = qMin(8, (int)recvCANFDData[i].frame.len);
+                memcpy(m_canBlockBuffer + offset, recvCANFDData[i].frame.data, copyLen);
+                m_canBlockReceivedMask |= (1 << (can_id - 1));
+                skipIMUParser = true;
+                
+                if (m_canBlockReceivedMask == 0xFFFFFFFF) {
+                    m_isReceivingCanBlock = false;
+                    // 拼包完成，进行校验与展示
+                    // 256 字节的最后一字节是校验和
+                    int sum = 0;
+                    for (int k = 2; k < 255; ++k) {
+                        sum += m_canBlockBuffer[k];
+                    }
+                    if ((sum & 0xFF) == m_canBlockBuffer[255]) {
+                        // 确保 DownCMDFeedback 是 0xFD44
+                        if (m_canBlockBuffer[3] == 0x44 && m_canBlockBuffer[4] == 0xFD) {
+                            int blockId = m_canBlockBuffer[7];
+                            QByteArray blockData((const char*)m_canBlockBuffer + 11, 240);
+                            QByteArray rawFrame((const char*)m_canBlockBuffer, 256);
+                            // 在 GUI 线程中调用弹窗解析和控制台打印
+                            showFlashBlockData(blockId, blockData, rawFrame);
+                        }
+                    }
+                }
+            }
+        }
+        // --- 结束 CAN 块读取拼包逻辑 ---
+
+        // 馈给姿传感器解析
+        if (!skipIMUParser) {
+            IMUParser::getInstance()->parseCANFrame(can_id, recvCANFDData[i].frame.data, recvCANFDData[i].frame.len, receiveTimeText);
+            saveParsedIMUSnapshot(can_id, channel, receiveTimeText, receiveElapsedMs);
+        }
 
         messageList.clear();
         messageList << receiveTimeText;//时间

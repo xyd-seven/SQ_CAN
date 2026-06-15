@@ -238,6 +238,11 @@ private:
     
     unsigned int m_serialUiUpdateCounter = 0;
 
+    // CAN 块读取相关变量
+    bool m_isReceivingCanBlock;
+    unsigned int m_canBlockReceivedMask;
+    unsigned char m_canBlockBuffer[256];
+
     bool m_canTimestampBaseValid[2];
     UINT64 m_canTimestampBaseRaw[2];
     QDateTime m_canTimestampBaseHostTime[2];

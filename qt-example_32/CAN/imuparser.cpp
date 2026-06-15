@@ -40,6 +40,9 @@ void IMUParser::parseCANFrame(unsigned int id, const unsigned char* data, unsign
         
         // 收到已存在于掩码中的 ID 时，认为上一包数据已经结束，重置接收掩码，作为新包的起始点
         if (id == 0x01) {
+            if (len < 3 || data[2] != 0x5C) {
+                return; // 过滤非原始数据的首包（例如块读取返回的 256 字节首包）
+            }
             m_rawReceivedMask = 0;
             memset(m_rawBuffer, 0, 96);
         } else if (m_rawReceivedMask == 0) {
