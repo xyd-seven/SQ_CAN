@@ -142,6 +142,25 @@ bool UdsClient::writeDataByIdentifier(uint16_t did, const QByteArray &data)
     return sendUdsRequest(0x2E, payload);
 }
 
+void UdsClient::setUpgradeConfig(const UpgradeConfig &config)
+{
+    m_upgradeConfig = config;
+    if (m_upgradeConfig.keySubFunction != static_cast<uint8_t>(m_upgradeConfig.seedSubFunction + 1)) {
+        m_upgradeConfig.keySubFunction = static_cast<uint8_t>(m_upgradeConfig.seedSubFunction + 1);
+    }
+    int addressLen = (m_upgradeConfig.addressAndLengthFormat >> 4) & 0x0F;
+    int sizeLen = m_upgradeConfig.addressAndLengthFormat & 0x0F;
+    if (addressLen < 1 || addressLen > 4 || sizeLen < 1 || sizeLen > 4) {
+        m_upgradeConfig.addressAndLengthFormat = 0x44;
+    }
+    if (m_upgradeConfig.defaultBlockSize < 8 || m_upgradeConfig.defaultBlockSize > 4095) {
+        m_upgradeConfig.defaultBlockSize = 256;
+    }
+    if (m_upgradeConfig.resetType != 0x01 && m_upgradeConfig.resetType != 0x03) {
+        m_upgradeConfig.resetType = 0x01;
+    }
+}
+
 // 接收底层数据帧入口
 void UdsClient::handleIncomingFrame(uint32_t id, const QByteArray &frameData)
 {
@@ -276,18 +295,20 @@ void UdsClient::handleUdsResponse(const QByteArray &udsPayload)
     for (int i = 0; i < udsPayload.size(); ++i) {
         hexStr += QString("%1 ").arg(static_cast<uint8_t>(udsPayload.at(i)), 2, 16, QChar('0')).toUpper();
     }
+    QString payloadDescription = describeUdsPayload(udsPayload);
+    QString descriptionSuffix = payloadDescription.isEmpty() ? QString() : QString(" (%1)").arg(payloadDescription);
 
     if (isPositive) {
-        emit logMessage(QString("RX <- 0x%1: %2").arg(m_responseID, 0, 16).arg(hexStr.trimmed()), 2);
+        emit logMessage(QString("RX <- 0x%1: %2%3").arg(m_responseID, 0, 16).arg(hexStr.trimmed()).arg(descriptionSuffix), 2);
     } else {
         // 专门处理 Response Pending 延迟响应 (NRC 0x78)
         if (nrc == 0x78) {
-            emit logMessage(QString("RX <- 0x%1: %2 (等待中)").arg(m_responseID, 0, 16).arg(hexStr.trimmed()), 0);
+            emit logMessage(QString("RX <- 0x%1: %2%3").arg(m_responseID, 0, 16).arg(hexStr.trimmed()).arg(descriptionSuffix), 0);
             m_udsTimeoutTimer->start(6000); // 重新启动 6秒超时定时器，继续等待正响应
             return; 
         }
         
-        emit logMessage(QString("RX <- 0x%1: %2 (负响应)").arg(m_responseID, 0, 16).arg(hexStr.trimmed()), 3);
+        emit logMessage(QString("RX <- 0x%1: %2%3").arg(m_responseID, 0, 16).arg(hexStr.trimmed()).arg(descriptionSuffix), 3);
     }
 
     m_waitingForUdsResponse = false;
@@ -514,7 +535,7 @@ bool UdsClient::startUpgrade(const QByteArray &firmwareData, uint32_t startAddre
     m_firmwareSentBytes = 0;
     m_upgradeBlockCounter = 1;
     m_upgradeRunning = true;
-    m_upgradeBlockSize = 256; // 默认传输块大小为 256 字节，可在 0x34 响应中由 ECU 给出
+    m_upgradeBlockSize = m_upgradeConfig.defaultBlockSize;
 
     if (m_testerPresentEnabled) {
         m_testerPresentTimer->stop();
@@ -594,7 +615,7 @@ void UdsClient::runUpgradeStateMachine()
             
         case UPG_SECURITY_SEED:
             // 步骤 2: 请求安全种子 (27 01)
-            sendUdsRequest(0x27, QByteArray::fromHex("01"));
+            sendUdsRequest(0x27, QByteArray(1, static_cast<char>(m_upgradeConfig.seedSubFunction)));
             break;
             
         case UPG_SECURITY_KEY:
@@ -610,21 +631,19 @@ void UdsClient::runUpgradeStateMachine()
             // 步骤 5: 请求下载 (34)
             // 格式: 34 + 00 (压缩/加密算法) + AddressAndLengthFormatIdentifier + Address (4字节) + Length (4字节)
             QByteArray payload;
-            payload.append(static_cast<char>(0x00)); // 默认无压缩无加密
-            payload.append(static_cast<char>(0x44)); // 起始地址占4字节，数据长度占4字节
-            
-            // 填充起始地址
-            payload.append(static_cast<char>((m_startAddress >> 24) & 0xFF));
-            payload.append(static_cast<char>((m_startAddress >> 16) & 0xFF));
-            payload.append(static_cast<char>((m_startAddress >> 8) & 0xFF));
-            payload.append(static_cast<char>(m_startAddress & 0xFF));
-            
-            // 填充固件大小
-            uint32_t size = m_firmwareData.size();
-            payload.append(static_cast<char>((size >> 24) & 0xFF));
-            payload.append(static_cast<char>((size >> 16) & 0xFF));
-            payload.append(static_cast<char>((size >> 8) & 0xFF));
-            payload.append(static_cast<char>(size & 0xFF));
+            payload.append(static_cast<char>(m_upgradeConfig.dataFormatIdentifier));
+            payload.append(static_cast<char>(m_upgradeConfig.addressAndLengthFormat));
+
+            int addressLen = (m_upgradeConfig.addressAndLengthFormat >> 4) & 0x0F;
+            int sizeLen = m_upgradeConfig.addressAndLengthFormat & 0x0F;
+            for (int i = addressLen - 1; i >= 0; --i) {
+                payload.append(static_cast<char>((m_startAddress >> (8 * i)) & 0xFF));
+            }
+
+            uint32_t size = static_cast<uint32_t>(m_firmwareData.size());
+            for (int i = sizeLen - 1; i >= 0; --i) {
+                payload.append(static_cast<char>((size >> (8 * i)) & 0xFF));
+            }
             
             sendUdsRequest(0x34, payload);
             break;
@@ -661,22 +680,40 @@ void UdsClient::runUpgradeStateMachine()
         case UPG_CHECKSUM_VERIFY: {
             // 步骤 8: 校验固件 (31) 
             // 格式: 31 01 (启动例程) + 02 02 (自检例程 DID) + CRC32 (4字节)
-            uint32_t crcVal = calculateCrc32(m_firmwareData);
-            QByteArray payload = QByteArray::fromHex("010202");
-            payload.append(static_cast<char>((crcVal >> 24) & 0xFF));
-            payload.append(static_cast<char>((crcVal >> 16) & 0xFF));
-            payload.append(static_cast<char>((crcVal >> 8) & 0xFF));
-            payload.append(static_cast<char>(crcVal & 0xFF));
-            
-            emit logMessage(QString("固件升级: 发送例程校验命令 31 01 02 02，附加 CRC32=0x%1")
-                            .arg(crcVal, 8, 16, QChar('0')).toUpper(), 0);
+            QByteArray payload;
+            payload.append(static_cast<char>(0x01));
+            payload.append(static_cast<char>((m_upgradeConfig.checksumRoutineId >> 8) & 0xFF));
+            payload.append(static_cast<char>(m_upgradeConfig.checksumRoutineId & 0xFF));
+
+            QString crcInfo = "未追加 CRC32";
+            if (m_upgradeConfig.appendCrc32) {
+                uint32_t crcVal = calculateCrc32(m_firmwareData);
+                if (m_upgradeConfig.crcBigEndian) {
+                    payload.append(static_cast<char>((crcVal >> 24) & 0xFF));
+                    payload.append(static_cast<char>((crcVal >> 16) & 0xFF));
+                    payload.append(static_cast<char>((crcVal >> 8) & 0xFF));
+                    payload.append(static_cast<char>(crcVal & 0xFF));
+                } else {
+                    payload.append(static_cast<char>(crcVal & 0xFF));
+                    payload.append(static_cast<char>((crcVal >> 8) & 0xFF));
+                    payload.append(static_cast<char>((crcVal >> 16) & 0xFF));
+                    payload.append(static_cast<char>((crcVal >> 24) & 0xFF));
+                }
+                crcInfo = QString("附加 CRC32=0x%1 (%2)")
+                              .arg(crcVal, 8, 16, QChar('0'))
+                              .arg(m_upgradeConfig.crcBigEndian ? "BigEndian" : "LittleEndian")
+                              .toUpper();
+            }
+
+            emit logMessage(QString("固件升级: 发送例程校验命令 RoutineID=0x%1，%2")
+                            .arg(m_upgradeConfig.checksumRoutineId, 4, 16, QChar('0')).arg(crcInfo), 0);
             
             sendUdsRequest(0x31, payload);
             break;
         }
         case UPG_ECU_RESET:
             // 步骤 9: ECU 重启运行新固件 (11 01)
-            sendUdsRequest(0x11, QByteArray::fromHex("01"));
+            sendUdsRequest(0x11, QByteArray(1, static_cast<char>(m_upgradeConfig.resetType)));
             break;
             
         case UPG_COMPLETED:
@@ -704,7 +741,7 @@ void UdsClient::onUdsResponseReceivedSlot(uint8_t serviceId, bool isPositive, co
             
         case UPG_SECURITY_SEED: {
             // 27 01 成功，提取种子并计算 Key
-            if (payload.size() >= 5 && static_cast<uint8_t>(payload.at(0)) == 0x01) {
+            if (payload.size() >= 5 && static_cast<uint8_t>(payload.at(0)) == m_upgradeConfig.seedSubFunction) {
                 uint32_t seed = (static_cast<uint8_t>(payload.at(1)) << 24) |
                                 (static_cast<uint8_t>(payload.at(2)) << 16) |
                                 (static_cast<uint8_t>(payload.at(3)) << 8)  |
@@ -718,7 +755,7 @@ void UdsClient::onUdsResponseReceivedSlot(uint8_t serviceId, bool isPositive, co
                 // 转入发送 KEY 状态
                 m_upgradeState = UPG_SECURITY_KEY;
                 QByteArray keyPayload;
-                keyPayload.append(static_cast<char>(0x02)); // sub-function: send key
+                keyPayload.append(static_cast<char>(m_upgradeConfig.keySubFunction));
                 keyPayload.append(static_cast<char>((key >> 24) & 0xFF));
                 keyPayload.append(static_cast<char>((key >> 16) & 0xFF));
                 keyPayload.append(static_cast<char>((key >> 8) & 0xFF));
@@ -744,7 +781,7 @@ void UdsClient::onUdsResponseReceivedSlot(uint8_t serviceId, bool isPositive, co
         case UPG_REQUEST_DOWNLOAD:
             // 34 成功，ECU 通常会返回允许的 BlockSize (由 34 响应负荷高4位和低4位定义)
             // 简单解析：如果是正响应 74 后面带有大小定义，我们可解析它
-            if (payload.size() >= 2) {
+            if (m_upgradeConfig.useEcuBlockSize && payload.size() >= 2) {
                 // 假设响应格式是 74 [LengthFormat] [MaxNumberOfBlockLength]
                 // 我们可以取得 ECU 期望的最大单包大小
                 uint8_t lenFormat = payload.at(0);
@@ -758,6 +795,9 @@ void UdsClient::onUdsResponseReceivedSlot(uint8_t serviceId, bool isPositive, co
                         m_upgradeBlockSize = ecuMaxLen - 2; // 去掉 0x36 和 blockCounter 的 2 字节
                         emit logMessage(QString("升级协商: ECU 允许的最大 Block 大小为 %1 字节 (UDS 净负荷: %2 字节)")
                                         .arg(ecuMaxLen).arg(m_upgradeBlockSize), 0);
+                    } else {
+                        emit logMessage(QString("升级协商: ECU Block 大小 %1 非法，保留默认值 %2")
+                                        .arg(ecuMaxLen).arg(m_upgradeBlockSize), 3);
                     }
                 }
             }
@@ -815,6 +855,71 @@ void UdsClient::resetTransportState(bool clearUdsWait)
         m_waitingForUdsResponse = false;
         m_waitingServiceId = 0;
     }
+}
+
+QString UdsClient::serviceName(uint8_t serviceId) const
+{
+    switch (serviceId) {
+        case 0x10: return "DiagnosticSessionControl";
+        case 0x11: return "ECUReset";
+        case 0x14: return "ClearDiagnosticInformation";
+        case 0x19: return "ReadDTCInformation";
+        case 0x22: return "ReadDataByIdentifier";
+        case 0x27: return "SecurityAccess";
+        case 0x28: return "CommunicationControl";
+        case 0x2E: return "WriteDataByIdentifier";
+        case 0x2F: return "InputOutputControlByIdentifier";
+        case 0x31: return "RoutineControl";
+        case 0x34: return "RequestDownload";
+        case 0x36: return "TransferData";
+        case 0x37: return "RequestTransferExit";
+        case 0x3E: return "TesterPresent";
+        case 0x85: return "ControlDTCSetting";
+        default:
+            return QString("UnknownService 0x%1")
+                .arg(QString("%1").arg(serviceId, 2, 16, QChar('0')).toUpper());
+    }
+}
+
+QString UdsClient::nrcDescription(uint8_t nrc) const
+{
+    switch (nrc) {
+        case 0x10: return "General Reject";
+        case 0x11: return "Service Not Supported";
+        case 0x12: return "SubFunction Not Supported";
+        case 0x13: return "Incorrect Message Length";
+        case 0x22: return "Conditions Not Correct";
+        case 0x31: return "Request Out Of Range";
+        case 0x33: return "Security Access Denied";
+        case 0x35: return "Invalid Key";
+        case 0x36: return "Exceed Number Of Attempts";
+        case 0x37: return "Required Time Delay Not Expired";
+        case 0x78: return "Response Pending";
+        default:
+            return QString("Unknown NRC 0x%1")
+                .arg(QString("%1").arg(nrc, 2, 16, QChar('0')).toUpper());
+    }
+}
+
+QString UdsClient::describeUdsPayload(const QByteArray &udsPayload) const
+{
+    if (udsPayload.isEmpty()) {
+        return "Empty response";
+    }
+
+    uint8_t serviceId = static_cast<uint8_t>(udsPayload.at(0));
+    if (serviceId == 0x7F) {
+        if (udsPayload.size() < 3) {
+            return "Malformed negative response";
+        }
+
+        uint8_t requestService = static_cast<uint8_t>(udsPayload.at(1));
+        uint8_t nrc = static_cast<uint8_t>(udsPayload.at(2));
+        return QString("%1: %2").arg(serviceName(requestService), nrcDescription(nrc));
+    }
+
+    uint8_t requestService = (serviceId >= 0x40) ? static_cast<uint8_t>(serviceId - 0x40) : serviceId;
+    return QString("%1 Positive").arg(serviceName(requestService));
 }
 
 uint32_t UdsClient::calculateCrc32(const QByteArray &data) const

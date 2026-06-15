@@ -11,6 +11,19 @@ class UdsClient : public QObject
 {
     Q_OBJECT
 public:
+    struct UpgradeConfig {
+        uint8_t seedSubFunction = 0x01;
+        uint8_t keySubFunction = 0x02;
+        uint8_t dataFormatIdentifier = 0x00;
+        uint8_t addressAndLengthFormat = 0x44;
+        int defaultBlockSize = 256;
+        bool useEcuBlockSize = true;
+        uint16_t checksumRoutineId = 0x0202;
+        bool appendCrc32 = true;
+        bool crcBigEndian = true;
+        uint8_t resetType = 0x01;
+    };
+
     explicit UdsClient(QObject *parent = nullptr);
     ~UdsClient();
 
@@ -30,6 +43,7 @@ public:
     bool writeDataByIdentifier(uint16_t did, const QByteArray &data);
     
     // 固件升级接口
+    void setUpgradeConfig(const UpgradeConfig &config);
     bool startUpgrade(const QByteArray &firmwareData, uint32_t startAddress);
     void abortUpgrade();
 
@@ -70,6 +84,9 @@ private:
 
     // UDS 响应处理
     void handleUdsResponse(const QByteArray &udsPayload);
+    QString serviceName(uint8_t serviceId) const;
+    QString nrcDescription(uint8_t nrc) const;
+    QString describeUdsPayload(const QByteArray &udsPayload) const;
 
     // 固件升级状态机控制
     enum UpgradeState {
@@ -146,6 +163,7 @@ private:
     int m_upgradeBlockCounter;
     int m_upgradeTotalBlocks;
     int m_upgradeBlockSize; // 刷写每块大小，协商而来或默认
+    UpgradeConfig m_upgradeConfig;
 };
 
 #endif // UDSCLIENT_H

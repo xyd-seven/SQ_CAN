@@ -9,6 +9,11 @@
 #include <QHeaderView>
 #include <QScrollBar>
 #include <QSettings>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
+#include <QTextStream>
 
 UdsWidget::UdsWidget(QWidget *parent)
     : QWidget(parent),
@@ -57,6 +62,15 @@ void UdsWidget::setCanThread(CANThread *thread)
 
 void UdsWidget::setupUi()
 {
+    setStyleSheet(
+        "QWidget { color: #d8dee9; }"
+        "QLabel { color: #d8dee9; }"
+        "QCheckBox { color: #eceff4; }"
+        "QRadioButton { color: #eceff4; }"
+        "QGroupBox { color: #88c0d0; }"
+        "QToolTip { color: #eceff4; background-color: #2e3440; border: 1px solid #4c566a; }"
+    );
+
     // 主垂直布局
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->setSpacing(8);
@@ -132,6 +146,12 @@ void UdsWidget::setupUi()
     treeGroup->setStyleSheet("QGroupBox { border: 1px solid #3b4252; border-radius: 6px; margin-top: 10px; font-weight: bold; color: #88c0d0; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }");
     QVBoxLayout *treeLayout = new QVBoxLayout(treeGroup);
     treeLayout->setContentsMargins(5, 15, 5, 5);
+
+    m_serviceSearchEdit = new QLineEdit(this);
+    m_serviceSearchEdit->setPlaceholderText(QString::fromUtf8("搜索服务 ID / 名称 / PDU"));
+    m_serviceSearchEdit->setClearButtonEnabled(true);
+    m_serviceSearchEdit->setStyleSheet(getLineEditStyleSheet());
+    treeLayout->addWidget(m_serviceSearchEdit);
     
     m_serviceTree = new QTreeWidget(this);
     m_serviceTree->setHeaderLabel(QString::fromUtf8("UDS 诊断目录 (双击自动填入)"));
@@ -181,6 +201,10 @@ void UdsWidget::setupUi()
     m_addToListBtn->setStyleSheet(getButtonStyleSheet());
     manualLayout->addWidget(m_addToListBtn, 1, 2);
 
+    m_pduStatusLabel = new QLabel(QString::fromUtf8("就绪"), this);
+    m_pduStatusLabel->setStyleSheet("QLabel { color: #d8dee9; padding-left: 4px; }");
+    manualLayout->addWidget(m_pduStatusLabel, 2, 0, 1, 3);
+
     diagTabLayout->addWidget(manualGroup, 0);
 
     // 2.2.1.2 诊断流程测试面板
@@ -193,6 +217,9 @@ void UdsWidget::setupUi()
     // 控制动作行
     QHBoxLayout *flowActionsLayout = new QHBoxLayout();
     flowActionsLayout->setSpacing(6);
+    QLabel *flowEditLabel = new QLabel(QString::fromUtf8("编辑"), this);
+    flowEditLabel->setStyleSheet("QLabel { color: #88c0d0; font-weight: bold; padding-right: 4px; }");
+    flowActionsLayout->addWidget(flowEditLabel);
     
     m_addDelayBtn = new QPushButton(QString::fromUtf8("添加延时"), this);
     m_addDelayBtn->setStyleSheet(getButtonStyleSheet());
@@ -203,7 +230,7 @@ void UdsWidget::setupUi()
     flowActionsLayout->addWidget(m_deleteBtn);
 
     m_clearListBtn = new QPushButton(QString::fromUtf8("清空列表"), this);
-    m_clearListBtn->setStyleSheet(getButtonStyleSheet());
+    m_clearListBtn->setStyleSheet(getButtonStyleSheet() + "QPushButton { background-color: #5a2f36; color: #eceff4; } QPushButton:hover { background-color: #bf616a; }");
     flowActionsLayout->addWidget(m_clearListBtn);
 
     m_moveUpBtn = new QPushButton(QString::fromUtf8("上移"), this);
@@ -213,6 +240,18 @@ void UdsWidget::setupUi()
     m_moveDownBtn = new QPushButton(QString::fromUtf8("下移"), this);
     m_moveDownBtn->setStyleSheet(getButtonStyleSheet());
     flowActionsLayout->addWidget(m_moveDownBtn);
+    flowActionsLayout->addSpacing(12);
+    QLabel *flowFileLabel = new QLabel(QString::fromUtf8("文件"), this);
+    flowFileLabel->setStyleSheet("QLabel { color: #88c0d0; font-weight: bold; padding-right: 4px; }");
+    flowActionsLayout->addWidget(flowFileLabel);
+
+    m_importFlowBtn = new QPushButton(QString::fromUtf8("导入流程"), this);
+    m_importFlowBtn->setStyleSheet(getButtonStyleSheet());
+    flowActionsLayout->addWidget(m_importFlowBtn);
+
+    m_exportFlowBtn = new QPushButton(QString::fromUtf8("导出流程"), this);
+    m_exportFlowBtn->setStyleSheet(getButtonStyleSheet());
+    flowActionsLayout->addWidget(m_exportFlowBtn);
 
     flowActionsLayout->addStretch(1);
 
@@ -220,17 +259,29 @@ void UdsWidget::setupUi()
 
     // 流程展示表格
     m_flowTable = new QTableWidget(this);
-    m_flowTable->setColumnCount(6);
-    m_flowTable->setHorizontalHeaderLabels(QStringList() << QString::fromUtf8("选择") << QString::fromUtf8("名称") << QString::fromUtf8("请求PDU") << QString::fromUtf8("响应PDU") << QString::fromUtf8("状态") << QString::fromUtf8("耗时"));
+    m_flowTable->setColumnCount(9);
+    m_flowTable->setHorizontalHeaderLabels(QStringList()
+                                           << QString::fromUtf8("选择")
+                                           << QString::fromUtf8("名称")
+                                           << QString::fromUtf8("请求PDU")
+                                           << QString::fromUtf8("响应PDU")
+                                           << QString::fromUtf8("状态")
+                                           << QString::fromUtf8("耗时")
+                                           << QString::fromUtf8("期望响应")
+                                           << QString::fromUtf8("匹配")
+                                           << QString::fromUtf8("失败策略"));
     m_flowTable->setStyleSheet(getTableStyleSheet());
     m_flowTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_flowTable->horizontalHeader()->setStretchLastSection(true);
-    m_flowTable->setColumnWidth(0, 40);
-    m_flowTable->setColumnWidth(1, 100);
-    m_flowTable->setColumnWidth(2, 100);
-    m_flowTable->setColumnWidth(3, 120);
-    m_flowTable->setColumnWidth(4, 70);
-    m_flowTable->setColumnWidth(5, 70);
+    m_flowTable->setColumnWidth(0, 48);
+    m_flowTable->setColumnWidth(1, 150);
+    m_flowTable->setColumnWidth(2, 180);
+    m_flowTable->setColumnWidth(3, 190);
+    m_flowTable->setColumnWidth(4, 90);
+    m_flowTable->setColumnWidth(5, 78);
+    m_flowTable->setColumnWidth(6, 170);
+    m_flowTable->setColumnWidth(7, 82);
+    m_flowTable->setColumnWidth(8, 96);
     m_flowTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     flowLayout->addWidget(m_flowTable);
 
@@ -262,7 +313,47 @@ void UdsWidget::setupUi()
 
     m_workTabWidget->addTab(m_diagTab, QString::fromUtf8("诊断调试与流程测试"));
 
-    // 2.2.2 Tab 2：固件升级
+    // 2.2.2 Tab 2：DTC 诊断
+    m_dtcTab = new QWidget(this);
+    QVBoxLayout *dtcLayout = new QVBoxLayout(m_dtcTab);
+    dtcLayout->setSpacing(8);
+    dtcLayout->setContentsMargins(8, 8, 8, 8);
+
+    QGroupBox *dtcControlGroup = new QGroupBox(QString::fromUtf8("DTC 快捷诊断"), this);
+    dtcControlGroup->setStyleSheet("QGroupBox { border: 1px solid #3b4252; border-radius: 4px; font-weight: bold; color: #88c0d0; }");
+    QHBoxLayout *dtcControlLayout = new QHBoxLayout(dtcControlGroup);
+    dtcControlLayout->setContentsMargins(8, 12, 8, 8);
+
+    dtcControlLayout->addWidget(new QLabel(QString::fromUtf8("状态掩码:"), this));
+    m_dtcStatusMaskEdit = new QLineEdit("FF", this);
+    m_dtcStatusMaskEdit->setMaxLength(2);
+    m_dtcStatusMaskEdit->setStyleSheet(getLineEditStyleSheet());
+    dtcControlLayout->addWidget(m_dtcStatusMaskEdit);
+
+    m_readDtcBtn = new QPushButton(QString::fromUtf8("读取 DTC"), this);
+    m_readDtcBtn->setStyleSheet(getButtonStyleSheet());
+    dtcControlLayout->addWidget(m_readDtcBtn);
+
+    m_clearDtcBtn = new QPushButton(QString::fromUtf8("清除全部 DTC"), this);
+    m_clearDtcBtn->setStyleSheet(getButtonStyleSheet() + "QPushButton { background-color: #5a2f36; color: #eceff4; } QPushButton:hover { background-color: #bf616a; }");
+    dtcControlLayout->addWidget(m_clearDtcBtn);
+    dtcControlLayout->addStretch(1);
+    dtcLayout->addWidget(dtcControlGroup, 0);
+
+    m_dtcTable = new QTableWidget(this);
+    m_dtcTable->setColumnCount(3);
+    m_dtcTable->setHorizontalHeaderLabels(QStringList() << "DTC" << QString::fromUtf8("状态") << QString::fromUtf8("原始记录"));
+    m_dtcTable->setStyleSheet(getTableStyleSheet());
+    m_dtcTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    m_dtcTable->horizontalHeader()->setStretchLastSection(true);
+    m_dtcTable->setColumnWidth(0, 120);
+    m_dtcTable->setColumnWidth(1, 100);
+    m_dtcTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    dtcLayout->addWidget(m_dtcTable, 1);
+
+    m_workTabWidget->addTab(m_dtcTab, QString::fromUtf8("DTC 诊断"));
+
+    // 2.2.3 Tab 3：固件升级
     m_upgradeTab = new QWidget(this);
     QVBoxLayout *upgLayout = new QVBoxLayout(m_upgradeTab);
     upgLayout->setSpacing(10);
@@ -289,7 +380,92 @@ void UdsWidget::setupUi()
     m_flashAddrEdit->setStyleSheet(getLineEditStyleSheet());
     fileLayout->addWidget(m_flashAddrEdit, 1, 1, 1, 2);
 
+    fileLayout->addWidget(new QLabel(QString::fromUtf8("Reset 类型:"), this), 2, 0);
+    m_resetTypeCombo = new QComboBox(this);
+    m_resetTypeCombo->addItem(QString::fromUtf8("硬复位 (11 01)"), 0x01);
+    m_resetTypeCombo->addItem(QString::fromUtf8("软复位 (11 03)"), 0x03);
+    m_resetTypeCombo->setStyleSheet(getComboBoxStyleSheet());
+    fileLayout->addWidget(m_resetTypeCombo, 2, 1, 1, 2);
+
     upgLayout->addWidget(fileGroup, 0);
+
+    QGroupBox *upgradeConfigGroup = new QGroupBox(QString::fromUtf8("刷写参数配置"), this);
+    upgradeConfigGroup->setStyleSheet("QGroupBox { border: 1px solid #3b4252; border-radius: 4px; font-weight: bold; color: #88c0d0; }");
+    QVBoxLayout *upgradeConfigLayout = new QVBoxLayout(upgradeConfigGroup);
+    upgradeConfigLayout->setSpacing(8);
+    upgradeConfigLayout->setContentsMargins(10, 15, 10, 10);
+
+    QGroupBox *securityGroup = new QGroupBox(QString::fromUtf8("安全访问"), this);
+    securityGroup->setStyleSheet("QGroupBox { border: 1px solid #4c566a; border-radius: 4px; margin-top: 8px; color: #d8dee9; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }");
+    QGridLayout *securityLayout = new QGridLayout(securityGroup);
+    securityLayout->setSpacing(8);
+    securityLayout->setContentsMargins(8, 14, 8, 8);
+    securityLayout->addWidget(new QLabel(QString::fromUtf8("Seed 子功能:"), this), 0, 0);
+    m_seedSubFuncEdit = new QLineEdit("01", this);
+    m_seedSubFuncEdit->setMaxLength(2);
+    m_seedSubFuncEdit->setStyleSheet(getLineEditStyleSheet());
+    securityLayout->addWidget(m_seedSubFuncEdit, 0, 1);
+
+    securityLayout->addWidget(new QLabel(QString::fromUtf8("Key 子功能:"), this), 0, 2);
+    m_keySubFuncEdit = new QLineEdit("02", this);
+    m_keySubFuncEdit->setMaxLength(2);
+    m_keySubFuncEdit->setStyleSheet(getLineEditStyleSheet());
+    securityLayout->addWidget(m_keySubFuncEdit, 0, 3);
+    upgradeConfigLayout->addWidget(securityGroup);
+
+    QGroupBox *downloadGroup = new QGroupBox(QString::fromUtf8("下载传输"), this);
+    downloadGroup->setStyleSheet("QGroupBox { border: 1px solid #4c566a; border-radius: 4px; margin-top: 8px; color: #d8dee9; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }");
+    QGridLayout *downloadLayout = new QGridLayout(downloadGroup);
+    downloadLayout->setSpacing(8);
+    downloadLayout->setContentsMargins(8, 14, 8, 8);
+    downloadLayout->addWidget(new QLabel(QString::fromUtf8("DFI:"), this), 0, 0);
+    m_dataFormatEdit = new QLineEdit("00", this);
+    m_dataFormatEdit->setMaxLength(2);
+    m_dataFormatEdit->setStyleSheet(getLineEditStyleSheet());
+    downloadLayout->addWidget(m_dataFormatEdit, 0, 1);
+
+    downloadLayout->addWidget(new QLabel(QString::fromUtf8("ALFI:"), this), 0, 2);
+    m_addressLengthFormatEdit = new QLineEdit("44", this);
+    m_addressLengthFormatEdit->setMaxLength(2);
+    m_addressLengthFormatEdit->setStyleSheet(getLineEditStyleSheet());
+    downloadLayout->addWidget(m_addressLengthFormatEdit, 0, 3);
+
+    downloadLayout->addWidget(new QLabel(QString::fromUtf8("默认块大小:"), this), 1, 0);
+    m_defaultBlockSizeSpin = new QSpinBox(this);
+    m_defaultBlockSizeSpin->setRange(8, 4095);
+    m_defaultBlockSizeSpin->setValue(256);
+    m_defaultBlockSizeSpin->setStyleSheet(getLineEditStyleSheet());
+    downloadLayout->addWidget(m_defaultBlockSizeSpin, 1, 1);
+
+    m_useEcuBlockSizeCheck = new QCheckBox(QString::fromUtf8("使用 ECU 块大小"), this);
+    m_useEcuBlockSizeCheck->setChecked(true);
+    m_useEcuBlockSizeCheck->setStyleSheet("QCheckBox { color: #eceff4; } QCheckBox::indicator { width: 14px; height: 14px; }");
+    downloadLayout->addWidget(m_useEcuBlockSizeCheck, 1, 2, 1, 2);
+    upgradeConfigLayout->addWidget(downloadGroup);
+
+    QGroupBox *checksumGroup = new QGroupBox(QString::fromUtf8("校验"), this);
+    checksumGroup->setStyleSheet("QGroupBox { border: 1px solid #4c566a; border-radius: 4px; margin-top: 8px; color: #d8dee9; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }");
+    QGridLayout *checksumLayout = new QGridLayout(checksumGroup);
+    checksumLayout->setSpacing(8);
+    checksumLayout->setContentsMargins(8, 14, 8, 8);
+    checksumLayout->addWidget(new QLabel(QString::fromUtf8("Routine ID:"), this), 0, 0);
+    m_routineIdEdit = new QLineEdit("0202", this);
+    m_routineIdEdit->setMaxLength(4);
+    m_routineIdEdit->setStyleSheet(getLineEditStyleSheet());
+    checksumLayout->addWidget(m_routineIdEdit, 0, 1);
+
+    m_appendCrcCheck = new QCheckBox(QString::fromUtf8("追加 CRC32"), this);
+    m_appendCrcCheck->setChecked(true);
+    m_appendCrcCheck->setStyleSheet("QCheckBox { color: #eceff4; } QCheckBox::indicator { width: 14px; height: 14px; }");
+    checksumLayout->addWidget(m_appendCrcCheck, 0, 2);
+
+    m_crcEndianCombo = new QComboBox(this);
+    m_crcEndianCombo->addItems(QStringList() << "Big Endian" << "Little Endian");
+    m_crcEndianCombo->setStyleSheet(getComboBoxStyleSheet());
+    checksumLayout->addWidget(m_crcEndianCombo, 0, 3);
+    upgradeConfigLayout->addWidget(checksumGroup);
+
+    upgLayout->addWidget(upgradeConfigGroup, 0);
 
     // 升级控制与进度组
     QGroupBox *progGroup = new QGroupBox(QString::fromUtf8("升级进度状态监控"), this);
@@ -340,6 +516,24 @@ void UdsWidget::setupUi()
     logLayout->setSpacing(6);
     logLayout->setContentsMargins(8, 15, 8, 8);
 
+    QHBoxLayout *logFilterLayout = new QHBoxLayout();
+    logFilterLayout->setSpacing(8);
+    m_logFilterCombo = new QComboBox(this);
+    m_logFilterCombo->addItem(QString::fromUtf8("全部日志"), -1);
+    m_logFilterCombo->addItem(QString::fromUtf8("系统"), 0);
+    m_logFilterCombo->addItem("TX", 1);
+    m_logFilterCombo->addItem("RX", 2);
+    m_logFilterCombo->addItem(QString::fromUtf8("错误"), 3);
+    m_logFilterCombo->setStyleSheet(getComboBoxStyleSheet());
+    logFilterLayout->addWidget(m_logFilterCombo);
+
+    m_logSearchEdit = new QLineEdit(this);
+    m_logSearchEdit->setPlaceholderText(QString::fromUtf8("搜索日志内容"));
+    m_logSearchEdit->setClearButtonEnabled(true);
+    m_logSearchEdit->setStyleSheet(getLineEditStyleSheet());
+    logFilterLayout->addWidget(m_logSearchEdit, 1);
+    logLayout->addLayout(logFilterLayout);
+
     m_consoleLog = new QPlainTextEdit(this);
     m_consoleLog->setReadOnly(true);
     m_consoleLog->setStyleSheet("QPlainTextEdit { background-color: #1e222b; color: #eceff4; font-family: Consolas, 'Courier New', monospace; font-size: 12px; border: 1px solid #2e3440; border-radius: 4px; }");
@@ -364,8 +558,12 @@ void UdsWidget::setupUi()
     statLayout->addStretch(1);
 
     m_clearLogBtn = new QPushButton(QString::fromUtf8("清空日志"), this);
-    m_clearLogBtn->setStyleSheet(getButtonStyleSheet());
+    m_clearLogBtn->setStyleSheet(getButtonStyleSheet() + "QPushButton { background-color: #5a2f36; color: #eceff4; } QPushButton:hover { background-color: #bf616a; }");
     statLayout->addWidget(m_clearLogBtn);
+
+    m_exportLogBtn = new QPushButton(QString::fromUtf8("导出日志"), this);
+    m_exportLogBtn->setStyleSheet(getButtonStyleSheet());
+    statLayout->addWidget(m_exportLogBtn);
 
     m_resetStatsBtn = new QPushButton(QString::fromUtf8("重置统计"), this);
     m_resetStatsBtn->setStyleSheet(getButtonStyleSheet());
@@ -384,6 +582,7 @@ void UdsWidget::setupUi()
     connect(m_paramDidEdit, &QLineEdit::editingFinished, this, &UdsWidget::onApplyConfig);
 
     connect(m_testerPresentCheck, &QCheckBox::stateChanged, this, &UdsWidget::onTesterPresentStateChanged);
+    connect(m_serviceSearchEdit, &QLineEdit::textChanged, this, &UdsWidget::filterServiceTree);
     connect(m_serviceTree, &QTreeWidget::itemDoubleClicked, this, &UdsWidget::onServiceTreeDoubleClicked);
     
     connect(m_sendBtn, &QPushButton::clicked, this, &UdsWidget::onSendImmediateClicked);
@@ -395,12 +594,27 @@ void UdsWidget::setupUi()
     connect(m_moveUpBtn, &QPushButton::clicked, this, &UdsWidget::onMoveUpClicked);
     connect(m_moveDownBtn, &QPushButton::clicked, this, &UdsWidget::onMoveDownClicked);
     connect(m_runFlowBtn, &QPushButton::clicked, this, &UdsWidget::onRunFlowClicked);
+    connect(m_importFlowBtn, &QPushButton::clicked, this, &UdsWidget::onImportFlowClicked);
+    connect(m_exportFlowBtn, &QPushButton::clicked, this, &UdsWidget::onExportFlowClicked);
+    connect(m_readDtcBtn, &QPushButton::clicked, this, &UdsWidget::onReadDtcClicked);
+    connect(m_clearDtcBtn, &QPushButton::clicked, this, &UdsWidget::onClearDtcClicked);
 
     connect(m_browseFileBtn, &QPushButton::clicked, this, &UdsWidget::onBrowseFileClicked);
     connect(m_startUpgradeBtn, &QPushButton::clicked, this, &UdsWidget::onStartUpgradeClicked);
     connect(m_abortUpgradeBtn, &QPushButton::clicked, this, &UdsWidget::onAbortUpgradeClicked);
+    connect(m_logFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &UdsWidget::refreshLogView);
+    connect(m_logSearchEdit, &QLineEdit::textChanged, this, &UdsWidget::refreshLogView);
 
-    connect(m_clearLogBtn, &QPushButton::clicked, m_consoleLog, &QPlainTextEdit::clear);
+    connect(m_clearLogBtn, &QPushButton::clicked, this, [this](){
+        if (m_logEntries.isEmpty()) {
+            return;
+        }
+        if (QMessageBox::question(this, "确认", "确定要清空当前日志吗？") == QMessageBox::Yes) {
+            m_logEntries.clear();
+            m_consoleLog->clear();
+        }
+    });
+    connect(m_exportLogBtn, &QPushButton::clicked, this, &UdsWidget::onExportLogClicked);
     connect(m_resetStatsBtn, &QPushButton::clicked, this, [this](){
         m_testCount = 0;
         m_passCount = 0;
@@ -424,6 +638,15 @@ void UdsWidget::initServiceTree()
     new QTreeWidgetItem(resetItem, QStringList() << QString::fromUtf8("硬复位 (11 01)") << "1101");
     new QTreeWidgetItem(resetItem, QStringList() << QString::fromUtf8("软复位 (11 03)") << "1103");
 
+    // 14 清除 DTC
+    QTreeWidgetItem *clearDtcItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("14 清除诊断故障码"));
+    new QTreeWidgetItem(clearDtcItem, QStringList() << QString::fromUtf8("清除全部 DTC (14 FF FF FF)") << "14FFFFFF");
+
+    // 19 读取 DTC
+    QTreeWidgetItem *dtcItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("19 读取诊断故障码"));
+    new QTreeWidgetItem(dtcItem, QStringList() << QString::fromUtf8("按状态掩码读取 DTC (19 02 FF)") << "1902FF");
+    new QTreeWidgetItem(dtcItem, QStringList() << QString::fromUtf8("读取支持的 DTC (19 0A)") << "190A");
+
     // 22 读数据
     QTreeWidgetItem *readItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("22 按标识符读取数据"));
     new QTreeWidgetItem(readItem, QStringList() << QString::fromUtf8("读取软件版本 (22 F1 89)") << "22F189");
@@ -435,17 +658,36 @@ void UdsWidget::initServiceTree()
     new QTreeWidgetItem(secItem, QStringList() << QString::fromUtf8("请求种子 (27 01)") << "2701");
     new QTreeWidgetItem(secItem, QStringList() << QString::fromUtf8("发送密钥 (27 02 示例)") << "270255AA1234");
 
+    // 28 通信控制
+    QTreeWidgetItem *commItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("28 通信控制"));
+    new QTreeWidgetItem(commItem, QStringList() << QString::fromUtf8("关闭 Rx/Tx 应用报文 (28 01 01)") << "280101");
+
     // 2E 写数据
     QTreeWidgetItem *writeItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("2E 按标识符写数据"));
     new QTreeWidgetItem(writeItem, QStringList() << QString::fromUtf8("参数写入模版 (2E F1 90 41 42)") << "2EF1904142");
+
+    // 2F IO 控制
+    QTreeWidgetItem *ioItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("2F IO 控制"));
+    new QTreeWidgetItem(ioItem, QStringList() << QString::fromUtf8("IO 控制模板 (2F F1 90 03)") << "2FF19003");
 
     // 31 例程控制
     QTreeWidgetItem *rtItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("31 例程控制"));
     new QTreeWidgetItem(rtItem, QStringList() << QString::fromUtf8("启动校验 (31 01 02 02)") << "31010202");
 
+    // 34/36/37 下载传输
+    QTreeWidgetItem *downloadItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("34/36/37 下载传输"));
+    new QTreeWidgetItem(downloadItem, QStringList() << QString::fromUtf8("请求下载模板 (34 00 44 08 00 80 00 00 00 10 00)") << "3400440800800000001000");
+    new QTreeWidgetItem(downloadItem, QStringList() << QString::fromUtf8("传输数据模板 (36 01)") << "3601");
+    new QTreeWidgetItem(downloadItem, QStringList() << QString::fromUtf8("退出传输 (37)") << "37");
+
     // 3E 在线保持
     QTreeWidgetItem *tpItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("3E 在线保持"));
     new QTreeWidgetItem(tpItem, QStringList() << QString::fromUtf8("发送保持 (3E 80)") << "3E80");
+
+    // 85 DTC 设置
+    QTreeWidgetItem *dtcSettingItem = new QTreeWidgetItem(m_serviceTree, QStringList() << QString::fromUtf8("85 DTC 设置"));
+    new QTreeWidgetItem(dtcSettingItem, QStringList() << QString::fromUtf8("开启 DTC 设置 (85 01)") << "8501");
+    new QTreeWidgetItem(dtcSettingItem, QStringList() << QString::fromUtf8("关闭 DTC 设置 (85 02)") << "8502");
 
     m_serviceTree->expandAll();
 }
@@ -457,7 +699,199 @@ void UdsWidget::updateStats()
     m_failCountLabel->setText(QString::fromUtf8("未通过: %1").arg(m_failCount));
 }
 
+QString UdsWidget::normalizeHexInput(const QString &input) const
+{
+    QString normalized;
+    for (const QChar &ch : input) {
+        if (!ch.isSpace()) {
+            normalized.append(ch);
+        }
+    }
+    return normalized.toUpper();
+}
+
+bool UdsWidget::isValidHexInput(const QString &input, QString *errorMessage) const
+{
+    QString normalized = normalizeHexInput(input);
+    if (normalized.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QString::fromUtf8("请求 PDU 不能为空");
+        }
+        return false;
+    }
+
+    if ((normalized.size() % 2) != 0) {
+        if (errorMessage) {
+            *errorMessage = QString::fromUtf8("请求 PDU 长度必须为偶数字符");
+        }
+        return false;
+    }
+
+    for (const QChar &ch : normalized) {
+        bool isHexChar = (ch >= QChar('0') && ch <= QChar('9')) ||
+                         (ch >= QChar('A') && ch <= QChar('F'));
+        if (!isHexChar) {
+            if (errorMessage) {
+                *errorMessage = QString::fromUtf8("请求 PDU 包含非十六进制字符: %1").arg(ch);
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+QString UdsWidget::formatHexWithSpaces(const QString &hex) const
+{
+    QString normalized = normalizeHexInput(hex);
+    QString formatted;
+    for (int i = 0; i < normalized.size(); i += 2) {
+        if (!formatted.isEmpty()) {
+            formatted.append(' ');
+        }
+        formatted.append(normalized.mid(i, 2));
+    }
+    return formatted;
+}
+
+QString UdsWidget::flowCellText(int row, int column, const QString &defaultValue) const
+{
+    QTableWidgetItem *item = m_flowTable->item(row, column);
+    if (!item) {
+        return defaultValue;
+    }
+    QString text = item->text().trimmed();
+    return text.isEmpty() ? defaultValue : text;
+}
+
+bool UdsWidget::matchExpectedResponse(const QString &actualResponse, const QString &expectedResponse, const QString &matchMode) const
+{
+    QString actual = normalizeHexInput(actualResponse);
+    QString expected = normalizeHexInput(expectedResponse);
+    QString mode = matchMode.trimmed().toLower();
+
+    if (expected.isEmpty()) {
+        return true;
+    }
+    if (expected == "TIMEOUT") {
+        return actual == "TIMEOUT";
+    }
+    if (mode.contains("exact") || mode.contains(QString::fromUtf8("完全"))) {
+        return actual == expected;
+    }
+    if (mode.contains("contains") || mode.contains("contain") || mode.contains(QString::fromUtf8("包含"))) {
+        return actual.contains(expected);
+    }
+    return actual.startsWith(expected);
+}
+
+bool UdsWidget::shouldStopOnFlowFailure(int row) const
+{
+    QString failPolicy = flowCellText(row, 8, QString::fromUtf8("继续")).trimmed().toLower();
+    return failPolicy.contains("stop") || failPolicy.contains(QString::fromUtf8("停止"));
+}
+
+void UdsWidget::finishFlowRun(const QString &message, int logType)
+{
+    m_flowRunning = false;
+    m_flowTimer->stop();
+    m_runFlowBtn->setText(QString::fromUtf8(" 列表发送 "));
+    m_runFlowBtn->setStyleSheet(getButtonStyleSheet());
+    m_addDelayBtn->setEnabled(true);
+    m_deleteBtn->setEnabled(true);
+    m_clearListBtn->setEnabled(true);
+    m_moveUpBtn->setEnabled(true);
+    m_moveDownBtn->setEnabled(true);
+    m_importFlowBtn->setEnabled(true);
+    onLogMessage(message, logType);
+}
+
 // 应用配置变更
+void UdsWidget::filterServiceTree(const QString &keyword)
+{
+    const QString filter = keyword.trimmed();
+    for (int i = 0; i < m_serviceTree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *parent = m_serviceTree->topLevelItem(i);
+        bool parentMatches = parent->text(0).contains(filter, Qt::CaseInsensitive) ||
+                             parent->text(1).contains(filter, Qt::CaseInsensitive);
+        bool hasVisibleChild = false;
+
+        for (int childIndex = 0; childIndex < parent->childCount(); ++childIndex) {
+            QTreeWidgetItem *child = parent->child(childIndex);
+            bool childMatches = filter.isEmpty() || parentMatches ||
+                                child->text(0).contains(filter, Qt::CaseInsensitive) ||
+                                child->text(1).contains(filter, Qt::CaseInsensitive);
+            child->setHidden(!childMatches);
+            hasVisibleChild = hasVisibleChild || childMatches;
+        }
+
+        parent->setHidden(!filter.isEmpty() && !parentMatches && !hasVisibleChild);
+        parent->setExpanded(!filter.isEmpty() && (parentMatches || hasVisibleChild));
+    }
+}
+
+void UdsWidget::setManualResponseStatus(const QString &text, const QColor &color)
+{
+    if (!m_pduStatusLabel) {
+        return;
+    }
+    m_pduStatusLabel->setText(text);
+    m_pduStatusLabel->setStyleSheet(QString("QLabel { color: %1; padding-left: 4px; }").arg(color.name()));
+}
+
+QString UdsWidget::logTypeLabel(int type) const
+{
+    switch (type) {
+        case 1:
+            return "TX";
+        case 2:
+            return "RX";
+        case 3:
+            return "ERR";
+        default:
+            return "SYS";
+    }
+}
+
+QString UdsWidget::formatLogLine(const QString &time, const QString &message, int type) const
+{
+    QString color = "#d8dee9";
+    if (type == 1) {
+        color = "#a3be8c";
+    } else if (type == 2) {
+        color = "#88c0d0";
+    } else if (type == 3) {
+        color = "#bf616a";
+    }
+
+    return QString("<font color=\"%1\">[%2] <b>[%3]</b> %4</font>")
+        .arg(color)
+        .arg(time)
+        .arg(logTypeLabel(type))
+        .arg(message.toHtmlEscaped());
+}
+
+void UdsWidget::refreshLogView()
+{
+    int typeFilter = m_logFilterCombo ? m_logFilterCombo->currentData().toInt() : -1;
+    QString keyword = m_logSearchEdit ? m_logSearchEdit->text().trimmed() : QString();
+
+    m_consoleLog->clear();
+    for (const LogEntry &entry : m_logEntries) {
+        if (typeFilter >= 0 && entry.type != typeFilter) {
+            continue;
+        }
+        if (!keyword.isEmpty() &&
+            !entry.message.contains(keyword, Qt::CaseInsensitive) &&
+            !entry.time.contains(keyword, Qt::CaseInsensitive) &&
+            !logTypeLabel(entry.type).contains(keyword, Qt::CaseInsensitive)) {
+            continue;
+        }
+        m_consoleLog->appendHtml(formatLogLine(entry.time, entry.message, entry.type));
+    }
+    m_consoleLog->verticalScrollBar()->setValue(m_consoleLog->verticalScrollBar()->maximum());
+}
+
 void UdsWidget::onApplyConfig()
 {
     bool ok;
@@ -503,12 +937,9 @@ void UdsWidget::onServiceTreeDoubleClicked(QTreeWidgetItem *item, int column)
     QString rawPdu = item->text(1);
     if (rawPdu.isEmpty()) return;
 
-    // 格式化加上空格
-    QString formatted;
-    for (int i = 0; i < rawPdu.size(); i += 2) {
-        formatted += rawPdu.mid(i, 2) + " ";
-    }
-    m_pduReqEdit->setText(formatted.trimmed().toUpper());
+    m_pduReqEdit->setText(formatHexWithSpaces(rawPdu));
+    m_pduReqEdit->setFocus();
+    setManualResponseStatus(QString::fromUtf8("已填入服务模板"), QColor("#88c0d0"));
 }
 
 // 单次诊断发送
@@ -516,19 +947,24 @@ void UdsWidget::onSendImmediateClicked()
 {
     onApplyConfig();
 
-    QString reqStr = m_pduReqEdit->text().replace(" ", "");
-    if (reqStr.isEmpty()) {
-        QMessageBox::warning(this, "提示", "请求 PDU 不能为空！");
+    QString errorMessage;
+    if (!isValidHexInput(m_pduReqEdit->text(), &errorMessage)) {
+        setManualResponseStatus(errorMessage, QColor("#bf616a"));
+        QMessageBox::warning(this, "提示", errorMessage);
         return;
     }
 
+    QString reqStr = normalizeHexInput(m_pduReqEdit->text());
+    m_pduReqEdit->setText(formatHexWithSpaces(reqStr));
     QByteArray pdu = QByteArray::fromHex(reqStr.toUtf8());
     if (pdu.isEmpty()) {
+        setManualResponseStatus(QString::fromUtf8("请求 PDU 转换失败"), QColor("#bf616a"));
         QMessageBox::warning(this, "提示", "请求 PDU 转换失败，请输入正确的十六进制报文！");
         return;
     }
 
     m_pduResEdit->clear();
+    setManualResponseStatus(QString::fromUtf8("等待响应..."), QColor("#ebcb8b"));
     uint8_t service = pdu.at(0);
     m_udsClient->sendUdsRequest(service, pdu.mid(1));
 }
@@ -536,11 +972,13 @@ void UdsWidget::onSendImmediateClicked()
 // 将 PDU 添加到自动化执行列表
 void UdsWidget::onAddToListClicked()
 {
-    QString pdu = m_pduReqEdit->text().trimmed().toUpper();
-    if (pdu.isEmpty()) {
-        QMessageBox::warning(this, "提示", "请先在请求 PDU 框输入数据！");
+    QString errorMessage;
+    if (!isValidHexInput(m_pduReqEdit->text(), &errorMessage)) {
+        QMessageBox::warning(this, "提示", errorMessage);
         return;
     }
+    QString pdu = formatHexWithSpaces(m_pduReqEdit->text());
+    m_pduReqEdit->setText(pdu);
 
     int row = m_flowTable->rowCount();
     m_flowTable->insertRow(row);
@@ -567,6 +1005,10 @@ void UdsWidget::onAddToListClicked()
 
     // 6. 耗时
     m_flowTable->setItem(row, 5, new QTableWidgetItem(""));
+
+    m_flowTable->setItem(row, 6, new QTableWidgetItem(""));
+    m_flowTable->setItem(row, 7, new QTableWidgetItem(QString::fromUtf8("前缀")));
+    m_flowTable->setItem(row, 8, new QTableWidgetItem(QString::fromUtf8("继续")));
 }
 
 // 添加延时步骤
@@ -589,11 +1031,19 @@ void UdsWidget::onAddDelayClicked()
     m_flowTable->setItem(row, 3, new QTableWidgetItem(""));
     m_flowTable->setItem(row, 4, new QTableWidgetItem(QString::fromUtf8("等待")));
     m_flowTable->setItem(row, 5, new QTableWidgetItem(""));
+    m_flowTable->setItem(row, 6, new QTableWidgetItem(""));
+    m_flowTable->setItem(row, 7, new QTableWidgetItem(QString::fromUtf8("前缀")));
+    m_flowTable->setItem(row, 8, new QTableWidgetItem(QString::fromUtf8("继续")));
 }
 
 // 删除选中行
 void UdsWidget::onDeleteStepClicked()
 {
+    if (m_flowRunning) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("流程运行中不能删除步骤。"));
+        return;
+    }
+
     int currentRow = m_flowTable->currentRow();
     if (currentRow >= 0) {
         m_flowTable->removeRow(currentRow);
@@ -603,12 +1053,27 @@ void UdsWidget::onDeleteStepClicked()
 // 清空列表
 void UdsWidget::onClearListClicked()
 {
+    if (m_flowRunning) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("流程运行中不能清空列表。"));
+        return;
+    }
+    if (m_flowTable->rowCount() == 0) {
+        return;
+    }
+    if (QMessageBox::question(this, QString::fromUtf8("确认"), QString::fromUtf8("确定要清空当前自动化流程列表吗？")) != QMessageBox::Yes) {
+        return;
+    }
     m_flowTable->setRowCount(0);
 }
 
 // 上移
 void UdsWidget::onMoveUpClicked()
 {
+    if (m_flowRunning) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("流程运行中不能调整步骤顺序。"));
+        return;
+    }
+
     int row = m_flowTable->currentRow();
     if (row > 0) {
         m_flowTable->insertRow(row - 1);
@@ -623,6 +1088,11 @@ void UdsWidget::onMoveUpClicked()
 // 下移
 void UdsWidget::onMoveDownClicked()
 {
+    if (m_flowRunning) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("流程运行中不能调整步骤顺序。"));
+        return;
+    }
+
     int row = m_flowTable->currentRow();
     if (row >= 0 && row < m_flowTable->rowCount() - 1) {
         m_flowTable->insertRow(row + 2);
@@ -634,16 +1104,355 @@ void UdsWidget::onMoveDownClicked()
     }
 }
 
+void UdsWidget::onExportFlowClicked()
+{
+    if (m_flowTable->rowCount() == 0) {
+        QMessageBox::warning(this, "提示", "流程列表为空，无法导出。");
+        return;
+    }
+
+    QString filePath = QFileDialog::getSaveFileName(this, QString::fromUtf8("导出流程"), "", "JSON Files (*.json);;All Files (*)");
+    if (filePath.isEmpty()) {
+        return;
+    }
+
+    QJsonArray steps;
+    for (int row = 0; row < m_flowTable->rowCount(); ++row) {
+        QTableWidgetItem *checkItem = m_flowTable->item(row, 0);
+        QJsonObject step;
+        step["enabled"] = !checkItem || checkItem->checkState() == Qt::Checked;
+        step["name"] = flowCellText(row, 1);
+        step["request"] = flowCellText(row, 2);
+        step["response"] = flowCellText(row, 3);
+        step["status"] = flowCellText(row, 4);
+        step["elapsed"] = flowCellText(row, 5);
+        step["expected"] = flowCellText(row, 6);
+        step["matchMode"] = flowCellText(row, 7, QString::fromUtf8("前缀"));
+        step["failPolicy"] = flowCellText(row, 8, QString::fromUtf8("继续"));
+        steps.append(step);
+    }
+
+    QJsonObject root;
+    root["version"] = 1;
+    root["steps"] = steps;
+
+    QSaveFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        QMessageBox::critical(this, "错误", QString("无法写入流程文件: %1").arg(filePath));
+        onLogMessage(QString("导出流程失败: 无法写入文件 %1").arg(filePath), 3);
+        return;
+    }
+
+    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    if (!file.commit()) {
+        QMessageBox::critical(this, "错误", QString("保存流程文件失败: %1").arg(filePath));
+        onLogMessage(QString("导出流程失败: 保存文件失败 %1").arg(filePath), 3);
+        return;
+    }
+
+    onLogMessage(QString("已导出自动化流程: %1").arg(filePath), 0);
+}
+
+void UdsWidget::onImportFlowClicked()
+{
+    if (m_flowRunning) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("流程运行中不能导入新流程。"));
+        return;
+    }
+
+    QString filePath = QFileDialog::getOpenFileName(this, QString::fromUtf8("导入流程"), "", "JSON Files (*.json);;All Files (*)");
+    if (filePath.isEmpty()) {
+        return;
+    }
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::critical(this, "错误", QString("无法打开流程文件: %1").arg(filePath));
+        onLogMessage(QString("导入流程失败: 无法打开文件 %1").arg(filePath), 3);
+        return;
+    }
+
+    QJsonParseError parseError;
+    QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        QMessageBox::critical(this, "错误", QString("流程 JSON 格式错误: %1").arg(parseError.errorString()));
+        onLogMessage(QString("导入流程失败: JSON 格式错误 %1").arg(filePath), 3);
+        return;
+    }
+
+    QJsonObject root = document.object();
+    if (root.value("version").toInt() != 1 || !root.value("steps").isArray()) {
+        QMessageBox::critical(this, "错误", "流程文件版本或 steps 字段无效。");
+        onLogMessage(QString("导入流程失败: 版本或字段无效 %1").arg(filePath), 3);
+        return;
+    }
+
+    struct FlowStep {
+        bool enabled;
+        QString name;
+        QString request;
+        QString expected;
+        QString matchMode;
+        QString failPolicy;
+    };
+
+    QVector<FlowStep> importedSteps;
+    int invalidCount = 0;
+    QJsonArray steps = root.value("steps").toArray();
+    for (const QJsonValue &value : steps) {
+        if (!value.isObject()) {
+            invalidCount++;
+            continue;
+        }
+
+        QJsonObject stepObject = value.toObject();
+        QString name = stepObject.value("name").toString(QString::fromUtf8("导入步骤"));
+        QString request = stepObject.value("request").toString();
+        QString expected = stepObject.value("expected").toString();
+        QString matchMode = stepObject.value("matchMode").toString(QString::fromUtf8("前缀"));
+        QString failPolicy = stepObject.value("failPolicy").toString(QString::fromUtf8("继续"));
+
+        bool isDelay = name.contains(QString::fromUtf8("延时")) || name.contains("Delay", Qt::CaseInsensitive);
+        QString errorMessage;
+        if (!isDelay && !isValidHexInput(request, &errorMessage)) {
+            invalidCount++;
+            continue;
+        }
+        if (!expected.isEmpty() &&
+            expected.trimmed().compare("TIMEOUT", Qt::CaseInsensitive) != 0 &&
+            !isValidHexInput(expected, &errorMessage)) {
+            invalidCount++;
+            continue;
+        }
+
+        FlowStep step;
+        step.enabled = stepObject.value("enabled").toBool(true);
+        step.name = name;
+        step.request = isDelay ? request.trimmed() : formatHexWithSpaces(request);
+        step.expected = expected.trimmed().compare("TIMEOUT", Qt::CaseInsensitive) == 0 ? "TIMEOUT" : formatHexWithSpaces(expected);
+        step.matchMode = matchMode.trimmed().isEmpty() ? QString::fromUtf8("前缀") : matchMode;
+        step.failPolicy = failPolicy.trimmed().isEmpty() ? QString::fromUtf8("继续") : failPolicy;
+        importedSteps.append(step);
+    }
+
+    if (importedSteps.isEmpty()) {
+        QMessageBox::critical(this, "错误", "流程文件没有可导入的合法步骤，当前流程未改变。");
+        onLogMessage(QString("导入流程失败: 无合法步骤，非法步骤数=%1").arg(invalidCount), 3);
+        return;
+    }
+
+    m_flowTable->setRowCount(0);
+    for (const FlowStep &step : importedSteps) {
+        int row = m_flowTable->rowCount();
+        m_flowTable->insertRow(row);
+
+        QTableWidgetItem *checkItem = new QTableWidgetItem();
+        checkItem->setCheckState(step.enabled ? Qt::Checked : Qt::Unchecked);
+        m_flowTable->setItem(row, 0, checkItem);
+        m_flowTable->setItem(row, 1, new QTableWidgetItem(step.name));
+        m_flowTable->setItem(row, 2, new QTableWidgetItem(step.request));
+        m_flowTable->setItem(row, 3, new QTableWidgetItem(""));
+
+        QTableWidgetItem *statusItem = new QTableWidgetItem(QString::fromUtf8("等待"));
+        statusItem->setForeground(QBrush(QColor("#d8dee9")));
+        m_flowTable->setItem(row, 4, statusItem);
+        m_flowTable->setItem(row, 5, new QTableWidgetItem(""));
+        m_flowTable->setItem(row, 6, new QTableWidgetItem(step.expected));
+        m_flowTable->setItem(row, 7, new QTableWidgetItem(step.matchMode));
+        m_flowTable->setItem(row, 8, new QTableWidgetItem(step.failPolicy));
+    }
+
+    QString message = QString("已导入自动化流程: %1，步骤=%2，跳过非法=%3")
+                          .arg(filePath)
+                          .arg(importedSteps.size())
+                          .arg(invalidCount);
+    onLogMessage(message, invalidCount > 0 ? 3 : 0);
+}
+
+void UdsWidget::onExportLogClicked()
+{
+    if (m_consoleLog->toPlainText().trimmed().isEmpty()) {
+        QMessageBox::warning(this, "提示", "日志为空，无法导出。");
+        return;
+    }
+
+    QString filePath = QFileDialog::getSaveFileName(this, QString::fromUtf8("导出日志"), "", "Text Files (*.txt);;All Files (*)");
+    if (filePath.isEmpty()) {
+        return;
+    }
+
+    QSaveFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::critical(this, "错误", QString("无法写入日志文件: %1").arg(filePath));
+        onLogMessage(QString("导出日志失败: 无法写入文件 %1").arg(filePath), 3);
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream.setCodec("UTF-8");
+    stream << m_consoleLog->toPlainText();
+    if (!file.commit()) {
+        QMessageBox::critical(this, "错误", QString("保存日志文件失败: %1").arg(filePath));
+        onLogMessage(QString("导出日志失败: 保存文件失败 %1").arg(filePath), 3);
+        return;
+    }
+
+    onLogMessage(QString("已导出日志: %1").arg(filePath), 0);
+}
+
+void UdsWidget::onReadDtcClicked()
+{
+    onApplyConfig();
+
+    QString errorMessage;
+    if (!isValidHexInput(m_dtcStatusMaskEdit->text(), &errorMessage) ||
+        normalizeHexInput(m_dtcStatusMaskEdit->text()).size() != 2) {
+        QMessageBox::warning(this, "提示", "DTC 状态掩码必须是 1 字节十六进制值。");
+        return;
+    }
+
+    QString mask = normalizeHexInput(m_dtcStatusMaskEdit->text());
+    m_dtcStatusMaskEdit->setText(mask);
+    m_dtcTable->setRowCount(0);
+    m_udsClient->sendUdsRequest(0x19, QByteArray::fromHex(QString("02%1").arg(mask).toUtf8()));
+}
+
+void UdsWidget::onClearDtcClicked()
+{
+    if (QMessageBox::question(this, "确认", "确定要清除全部 DTC 吗？") != QMessageBox::Yes) {
+        return;
+    }
+
+    onApplyConfig();
+    m_udsClient->sendUdsRequest(0x14, QByteArray::fromHex("FFFFFF"));
+}
+
+void UdsWidget::updateDtcTable(const QByteArray &payload)
+{
+    if (payload.size() < 2 || static_cast<uint8_t>(payload.at(0)) != 0x02) {
+        return;
+    }
+
+    m_dtcTable->setRowCount(0);
+    int recordOffset = 2; // sub-function + status availability mask
+    int invalidBytes = (payload.size() - recordOffset) % 4;
+    for (int offset = recordOffset; offset + 3 < payload.size(); offset += 4) {
+        uint32_t dtc = (static_cast<uint8_t>(payload.at(offset)) << 16) |
+                       (static_cast<uint8_t>(payload.at(offset + 1)) << 8) |
+                        static_cast<uint8_t>(payload.at(offset + 2));
+        uint8_t status = static_cast<uint8_t>(payload.at(offset + 3));
+
+        QString dtcText = QString("%1").arg(dtc, 6, 16, QChar('0')).toUpper();
+        QString statusText = QString("0x%1").arg(status, 2, 16, QChar('0')).toUpper();
+        QString rawText = QString("%1 %2 %3 %4")
+                              .arg(static_cast<uint8_t>(payload.at(offset)), 2, 16, QChar('0'))
+                              .arg(static_cast<uint8_t>(payload.at(offset + 1)), 2, 16, QChar('0'))
+                              .arg(static_cast<uint8_t>(payload.at(offset + 2)), 2, 16, QChar('0'))
+                              .arg(status, 2, 16, QChar('0'))
+                              .toUpper();
+
+        int row = m_dtcTable->rowCount();
+        m_dtcTable->insertRow(row);
+        m_dtcTable->setItem(row, 0, new QTableWidgetItem(dtcText));
+        m_dtcTable->setItem(row, 1, new QTableWidgetItem(statusText));
+        m_dtcTable->setItem(row, 2, new QTableWidgetItem(rawText));
+    }
+
+    if (m_dtcTable->rowCount() == 0) {
+        onLogMessage("DTC 读取完成: 未返回故障码记录", 0);
+    } else {
+        onLogMessage(QString("DTC 读取完成: 共 %1 条记录").arg(m_dtcTable->rowCount()), 0);
+    }
+    if (invalidBytes > 0) {
+        onLogMessage(QString("DTC 响应提示: 尾部存在 %1 个未解析字节").arg(invalidBytes), 3);
+    }
+}
+
+bool UdsWidget::buildUpgradeConfig(UdsClient::UpgradeConfig *config, QString *errorMessage) const
+{
+    auto parseHexByte = [this, errorMessage](QLineEdit *edit, const QString &fieldName, uint8_t *value) -> bool {
+        QString error;
+        QString text = edit->text();
+        if (!isValidHexInput(text, &error) || normalizeHexInput(text).size() != 2) {
+            if (errorMessage) {
+                *errorMessage = QString("%1 必须是 1 字节十六进制值").arg(fieldName);
+            }
+            return false;
+        }
+        *value = static_cast<uint8_t>(normalizeHexInput(text).toUInt(nullptr, 16));
+        return true;
+    };
+
+    auto parseHexWord = [this, errorMessage](QLineEdit *edit, const QString &fieldName, uint16_t *value) -> bool {
+        QString error;
+        QString text = edit->text();
+        if (!isValidHexInput(text, &error) || normalizeHexInput(text).size() != 4) {
+            if (errorMessage) {
+                *errorMessage = QString("%1 必须是 2 字节十六进制值").arg(fieldName);
+            }
+            return false;
+        }
+        *value = static_cast<uint16_t>(normalizeHexInput(text).toUInt(nullptr, 16));
+        return true;
+    };
+
+    UdsClient::UpgradeConfig nextConfig;
+    if (!parseHexByte(m_seedSubFuncEdit, QString::fromUtf8("Seed 子功能"), &nextConfig.seedSubFunction) ||
+        !parseHexByte(m_keySubFuncEdit, QString::fromUtf8("Key 子功能"), &nextConfig.keySubFunction) ||
+        !parseHexByte(m_dataFormatEdit, QString::fromUtf8("DFI"), &nextConfig.dataFormatIdentifier) ||
+        !parseHexByte(m_addressLengthFormatEdit, QString::fromUtf8("ALFI"), &nextConfig.addressAndLengthFormat) ||
+        !parseHexWord(m_routineIdEdit, QString::fromUtf8("Routine ID"), &nextConfig.checksumRoutineId)) {
+        return false;
+    }
+
+    if (nextConfig.keySubFunction != static_cast<uint8_t>(nextConfig.seedSubFunction + 1)) {
+        if (errorMessage) {
+            *errorMessage = QString::fromUtf8("Key 子功能必须等于 Seed 子功能 + 1");
+        }
+        return false;
+    }
+
+    int addressLen = (nextConfig.addressAndLengthFormat >> 4) & 0x0F;
+    int sizeLen = nextConfig.addressAndLengthFormat & 0x0F;
+    if (addressLen < 1 || addressLen > 4 || sizeLen < 1 || sizeLen > 4) {
+        if (errorMessage) {
+            *errorMessage = QString::fromUtf8("ALFI 的地址长度和数据长度字段必须在 1 到 4 字节之间");
+        }
+        return false;
+    }
+
+    nextConfig.defaultBlockSize = m_defaultBlockSizeSpin->value();
+    nextConfig.useEcuBlockSize = m_useEcuBlockSizeCheck->isChecked();
+    nextConfig.appendCrc32 = m_appendCrcCheck->isChecked();
+    nextConfig.crcBigEndian = (m_crcEndianCombo->currentIndex() == 0);
+    nextConfig.resetType = static_cast<uint8_t>(m_resetTypeCombo->currentData().toUInt());
+
+    if (config) {
+        *config = nextConfig;
+    }
+    return true;
+}
+
+void UdsWidget::setUpgradeConfigControlsEnabled(bool enabled)
+{
+    m_seedSubFuncEdit->setEnabled(enabled);
+    m_keySubFuncEdit->setEnabled(enabled);
+    m_dataFormatEdit->setEnabled(enabled);
+    m_addressLengthFormatEdit->setEnabled(enabled);
+    m_defaultBlockSizeSpin->setEnabled(enabled);
+    m_useEcuBlockSizeCheck->setEnabled(enabled);
+    m_routineIdEdit->setEnabled(enabled);
+    m_appendCrcCheck->setEnabled(enabled);
+    m_crcEndianCombo->setEnabled(enabled);
+    m_resetTypeCombo->setEnabled(enabled);
+}
+
 // 点击运行自动化列表流程
 void UdsWidget::onRunFlowClicked()
 {
     if (m_flowRunning) {
         // 主动停止
-        m_flowRunning = false;
-        m_flowTimer->stop();
-        m_runFlowBtn->setText(QString::fromUtf8(" 列表发送 "));
-        m_runFlowBtn->setStyleSheet(getButtonStyleSheet());
-        onLogMessage("自动化流程测试被用户中止！", 3);
+        finishFlowRun("自动化流程测试被用户中止！", 3);
         return;
     }
 
@@ -661,13 +1470,25 @@ void UdsWidget::onRunFlowClicked()
 
     m_runFlowBtn->setText(QString::fromUtf8(" 中止发送 "));
     m_runFlowBtn->setStyleSheet(getButtonStyleSheet() + "QPushButton { background-color: #bf616a; color: #eceff4; }");
+    m_addDelayBtn->setEnabled(false);
+    m_deleteBtn->setEnabled(false);
+    m_clearListBtn->setEnabled(false);
+    m_moveUpBtn->setEnabled(false);
+    m_moveDownBtn->setEnabled(false);
+    m_importFlowBtn->setEnabled(false);
 
     // 重置所有步骤状态显示
     for (int i = 0; i < m_flowTable->rowCount(); ++i) {
-        m_flowTable->item(i, 3)->setText("");
-        m_flowTable->item(i, 4)->setText(QString::fromUtf8("等待"));
-        m_flowTable->item(i, 4)->setForeground(QBrush(QColor("#d8dee9")));
-        m_flowTable->item(i, 5)->setText("");
+        if (m_flowTable->item(i, 3)) {
+            m_flowTable->item(i, 3)->setText("");
+        }
+        if (m_flowTable->item(i, 4)) {
+            m_flowTable->item(i, 4)->setText(QString::fromUtf8("等待"));
+            m_flowTable->item(i, 4)->setForeground(QBrush(QColor("#d8dee9")));
+        }
+        if (m_flowTable->item(i, 5)) {
+            m_flowTable->item(i, 5)->setText("");
+        }
     }
 
     onLogMessage(QString("=== 开始执行自动化测试流程 (第 1 轮/共 %1 轮) ===").arg(m_flowTotalLoops), 0);
@@ -699,10 +1520,7 @@ void UdsWidget::onFlowTimerTimeout()
             m_flowTimer->start(m_intervalSpin->value());
         } else {
             // 全部结束
-            m_flowRunning = false;
-            m_runFlowBtn->setText(QString::fromUtf8(" 列表发送 "));
-            m_runFlowBtn->setStyleSheet(getButtonStyleSheet());
-            onLogMessage("=== 自动化流程测试全部完成！ ===", 0);
+            finishFlowRun("=== 自动化流程测试全部完成！ ===", 0);
         }
         return;
     }
@@ -734,10 +1552,23 @@ void UdsWidget::onFlowTimerTimeout()
         m_flowTimer->start(delayVal);
     } else {
         // UDS 诊断指令发送
+        QString errorMessage;
+        if (!isValidHexInput(pduStr, &errorMessage)) {
+            statusItem->setText(QString::fromUtf8("错误"));
+            statusItem->setForeground(QBrush(QColor("#bf616a")));
+            onLogMessage(QString("自动化流程错误: 步骤 %1 请求 PDU 无效 - %2").arg(m_flowCurrentIndex + 1).arg(errorMessage), 3);
+            m_flowCurrentIndex++;
+            m_flowTimer->start(m_intervalSpin->value());
+            return;
+        }
+
+        pduStr = normalizeHexInput(pduStr);
+        pduItem->setText(formatHexWithSpaces(pduStr));
         QByteArray pdu = QByteArray::fromHex(pduStr.toUtf8());
         if (pdu.isEmpty()) {
             statusItem->setText(QString::fromUtf8("错误"));
             statusItem->setForeground(QBrush(QColor("#bf616a")));
+            onLogMessage(QString("自动化流程错误: 步骤 %1 请求 PDU 转换失败").arg(m_flowCurrentIndex + 1), 3);
             m_flowCurrentIndex++;
             m_flowTimer->start(m_intervalSpin->value());
             return;
@@ -754,8 +1585,6 @@ void UdsWidget::onFlowTimerTimeout()
 // 接收底层的 UDS 响应反馈
 void UdsWidget::onUdsResponseReceived(uint8_t serviceId, bool isPositive, const QByteArray &payload, uint8_t nrc)
 {
-    Q_UNUSED(serviceId);
-    
     // 组装十六进制显示
     QString hexStr;
     if (isPositive) {
@@ -770,9 +1599,36 @@ void UdsWidget::onUdsResponseReceived(uint8_t serviceId, bool isPositive, const 
     hexStr = hexStr.trimmed();
 
     m_pduResEdit->setText(hexStr);
+    setManualResponseStatus(isPositive ? QString::fromUtf8("收到正响应") : QString::fromUtf8("收到负响应"),
+                            isPositive ? QColor("#a3be8c") : QColor("#bf616a"));
+    if (isPositive && serviceId == 0x59) {
+        updateDtcTable(payload);
+    } else if (isPositive && serviceId == 0x54) {
+        m_dtcTable->setRowCount(0);
+        onLogMessage("DTC 清除成功，已清空 DTC 表格", 0);
+    }
+
+    bool stepPassed = isPositive;
+    bool expectationValid = true;
+    QString expectationError;
+    QString expectedResponse;
+    QString matchMode;
+    if (m_flowRunning && m_flowCurrentIndex < m_flowTable->rowCount()) {
+        expectedResponse = flowCellText(m_flowCurrentIndex, 6);
+        matchMode = flowCellText(m_flowCurrentIndex, 7, QString::fromUtf8("前缀"));
+        if (!expectedResponse.isEmpty()) {
+            if (expectedResponse.trimmed().compare("TIMEOUT", Qt::CaseInsensitive) != 0 &&
+                !isValidHexInput(expectedResponse, &expectationError)) {
+                expectationValid = false;
+                stepPassed = false;
+            } else {
+                stepPassed = matchExpectedResponse(hexStr, expectedResponse, matchMode);
+            }
+        }
+    }
 
     m_testCount++;
-    if (isPositive) m_passCount++;
+    if (stepPassed) m_passCount++;
     else m_failCount++;
     updateStats();
 
@@ -784,13 +1640,30 @@ void UdsWidget::onUdsResponseReceived(uint8_t serviceId, bool isPositive, const 
         }
         QTableWidgetItem *statusItem = m_flowTable->item(m_flowCurrentIndex, 4);
         if (statusItem) {
-            if (isPositive) {
+            if (stepPassed) {
                 statusItem->setText(QString::fromUtf8("成功"));
                 statusItem->setForeground(QBrush(QColor("#a3be8c")));
+            } else if (!expectationValid) {
+                statusItem->setText(QString::fromUtf8("期望错误"));
+                statusItem->setForeground(QBrush(QColor("#bf616a")));
+                onLogMessage(QString("自动化流程错误: 步骤 %1 期望响应无效 - %2").arg(m_flowCurrentIndex + 1).arg(expectationError), 3);
+            } else if (!expectedResponse.isEmpty()) {
+                statusItem->setText(QString::fromUtf8("断言失败"));
+                statusItem->setForeground(QBrush(QColor("#bf616a")));
+                onLogMessage(QString("自动化流程断言失败: 步骤 %1，期望=%2，实际=%3，模式=%4")
+                             .arg(m_flowCurrentIndex + 1)
+                             .arg(formatHexWithSpaces(expectedResponse))
+                             .arg(hexStr)
+                             .arg(matchMode), 3);
             } else {
                 statusItem->setText(QString("错误 (0x%1)").arg(nrc, 2, 16, QChar('0')).toUpper());
                 statusItem->setForeground(QBrush(QColor("#bf616a")));
             }
+        }
+
+        if (!stepPassed && shouldStopOnFlowFailure(m_flowCurrentIndex)) {
+            finishFlowRun(QString("=== 自动化流程因步骤 %1 失败而停止 ===").arg(m_flowCurrentIndex + 1), 3);
+            return;
         }
 
         m_flowCurrentIndex++;
@@ -802,8 +1675,18 @@ void UdsWidget::onUdsResponseReceived(uint8_t serviceId, bool isPositive, const 
 void UdsWidget::onUdsResponseTimeout()
 {
     m_pduResEdit->setText("TIMEOUT");
+    setManualResponseStatus(QString::fromUtf8("响应超时"), QColor("#bf616a"));
+    bool stepPassed = false;
+    if (m_flowRunning && m_flowCurrentIndex < m_flowTable->rowCount()) {
+        QString expectedResponse = flowCellText(m_flowCurrentIndex, 6);
+        if (!expectedResponse.isEmpty()) {
+            stepPassed = matchExpectedResponse("TIMEOUT", expectedResponse, flowCellText(m_flowCurrentIndex, 7, QString::fromUtf8("前缀")));
+        }
+    }
+
     m_testCount++;
-    m_failCount++;
+    if (stepPassed) m_passCount++;
+    else m_failCount++;
     updateStats();
 
     if (m_flowRunning && m_flowCurrentIndex < m_flowTable->rowCount()) {
@@ -813,8 +1696,18 @@ void UdsWidget::onUdsResponseTimeout()
         }
         QTableWidgetItem *statusItem = m_flowTable->item(m_flowCurrentIndex, 4);
         if (statusItem) {
-            statusItem->setText(QString::fromUtf8("超时"));
-            statusItem->setForeground(QBrush(QColor("#bf616a")));
+            if (stepPassed) {
+                statusItem->setText(QString::fromUtf8("成功"));
+                statusItem->setForeground(QBrush(QColor("#a3be8c")));
+            } else {
+                statusItem->setText(QString::fromUtf8("超时"));
+                statusItem->setForeground(QBrush(QColor("#bf616a")));
+            }
+        }
+
+        if (!stepPassed && shouldStopOnFlowFailure(m_flowCurrentIndex)) {
+            finishFlowRun(QString("=== 自动化流程因步骤 %1 超时而停止 ===").arg(m_flowCurrentIndex + 1), 3);
+            return;
         }
 
         m_flowCurrentIndex++;
@@ -861,10 +1754,19 @@ void UdsWidget::onStartUpgradeClicked()
         return;
     }
 
+    UdsClient::UpgradeConfig upgradeConfig;
+    QString configError;
+    if (!buildUpgradeConfig(&upgradeConfig, &configError)) {
+        QMessageBox::critical(this, "错误", QString("刷写参数配置无效: %1").arg(configError));
+        return;
+    }
+    m_udsClient->setUpgradeConfig(upgradeConfig);
+
     // 禁用交互控件，升级期间防止误操作
     m_startUpgradeBtn->setEnabled(false);
     m_browseFileBtn->setEnabled(false);
     m_flashAddrEdit->setEnabled(false);
+    setUpgradeConfigControlsEnabled(false);
     m_channelCombo->setEnabled(false);
     m_protocolCombo->setEnabled(false);
     m_reqIdEdit->setEnabled(false);
@@ -919,6 +1821,7 @@ void UdsWidget::onUpgradeCompleted(bool success, const QString &errorMsg)
     m_startUpgradeBtn->setEnabled(true);
     m_browseFileBtn->setEnabled(true);
     m_flashAddrEdit->setEnabled(true);
+    setUpgradeConfigControlsEnabled(true);
     m_channelCombo->setEnabled(true);
     m_protocolCombo->setEnabled(true);
     m_reqIdEdit->setEnabled(true);
@@ -934,6 +1837,20 @@ void UdsWidget::onUpgradeCompleted(bool success, const QString &errorMsg)
 void UdsWidget::onLogMessage(const QString &msg, int type)
 {
     QString timeStr = QTime::currentTime().toString("hh:mm:ss.zzz");
+    LogEntry entry;
+    entry.time = timeStr;
+    entry.message = msg;
+    entry.type = type;
+    m_logEntries.append(entry);
+
+    const int maxLogEntries = 5000;
+    while (m_logEntries.size() > maxLogEntries) {
+        m_logEntries.removeFirst();
+    }
+
+    refreshLogView();
+    return;
+
     QString logLine;
     
     // 使用富文本进行终端配色渲染

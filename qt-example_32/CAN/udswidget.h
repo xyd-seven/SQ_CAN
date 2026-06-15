@@ -8,12 +8,14 @@
 #include <QLineEdit>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QColor>
 #include <QSpinBox>
 #include <QPushButton>
 #include <QProgressBar>
 #include <QLabel>
 #include <QSplitter>
 #include <QTimer>
+#include <QVector>
 #include "udsclient.h"
 
 class UdsWidget : public QWidget
@@ -47,6 +49,13 @@ private slots:
     void onMoveDownClicked();
     void onRunFlowClicked();
     void onFlowTimerTimeout();
+    void onImportFlowClicked();
+    void onExportFlowClicked();
+    void onExportLogClicked();
+    void onReadDtcClicked();
+    void onClearDtcClicked();
+    void filterServiceTree(const QString &keyword);
+    void refreshLogView();
 
     // 软件升级槽
     void onBrowseFileClicked();
@@ -67,6 +76,25 @@ private:
     void updateStats();
     void loadSettings();
     void saveSettings();
+    QString normalizeHexInput(const QString &input) const;
+    bool isValidHexInput(const QString &input, QString *errorMessage) const;
+    QString formatHexWithSpaces(const QString &hex) const;
+    QString flowCellText(int row, int column, const QString &defaultValue = QString()) const;
+    bool matchExpectedResponse(const QString &actualResponse, const QString &expectedResponse, const QString &matchMode) const;
+    bool shouldStopOnFlowFailure(int row) const;
+    void finishFlowRun(const QString &message, int logType);
+    void updateDtcTable(const QByteArray &payload);
+    bool buildUpgradeConfig(UdsClient::UpgradeConfig *config, QString *errorMessage) const;
+    void setUpgradeConfigControlsEnabled(bool enabled);
+    void setManualResponseStatus(const QString &text, const QColor &color);
+    QString formatLogLine(const QString &time, const QString &message, int type) const;
+    QString logTypeLabel(int type) const;
+
+    struct LogEntry {
+        QString time;
+        QString message;
+        int type;
+    };
     
     // UI 样式表定义
     QString getButtonStyleSheet();
@@ -90,16 +118,19 @@ private:
     QLineEdit *m_paramDidEdit;
 
     // 2. 左侧服务树
+    QLineEdit *m_serviceSearchEdit;
     QTreeWidget *m_serviceTree;
 
     // 3. 右侧 Tab 工作区
     QTabWidget *m_workTabWidget;
     QWidget *m_diagTab;
+    QWidget *m_dtcTab;
     QWidget *m_upgradeTab;
 
     // 3.1 诊断调试 Tab 控件
     QLineEdit *m_pduReqEdit;
     QLineEdit *m_pduResEdit;
+    QLabel *m_pduStatusLabel;
     QPushButton *m_sendBtn;
     QPushButton *m_addToListBtn;
     
@@ -110,6 +141,14 @@ private:
     QPushButton *m_moveUpBtn;
     QPushButton *m_moveDownBtn;
     QPushButton *m_runFlowBtn;
+    QPushButton *m_importFlowBtn;
+    QPushButton *m_exportFlowBtn;
+    QPushButton *m_exportLogBtn;
+
+    QLineEdit *m_dtcStatusMaskEdit;
+    QPushButton *m_readDtcBtn;
+    QPushButton *m_clearDtcBtn;
+    QTableWidget *m_dtcTable;
     QSpinBox *m_loopSpin;
     QSpinBox *m_intervalSpin;
 
@@ -117,6 +156,16 @@ private:
     QLineEdit *m_filePathEdit;
     QPushButton *m_browseFileBtn;
     QLineEdit *m_flashAddrEdit;
+    QLineEdit *m_seedSubFuncEdit;
+    QLineEdit *m_keySubFuncEdit;
+    QLineEdit *m_dataFormatEdit;
+    QLineEdit *m_addressLengthFormatEdit;
+    QSpinBox *m_defaultBlockSizeSpin;
+    QCheckBox *m_useEcuBlockSizeCheck;
+    QLineEdit *m_routineIdEdit;
+    QCheckBox *m_appendCrcCheck;
+    QComboBox *m_crcEndianCombo;
+    QComboBox *m_resetTypeCombo;
     QProgressBar *m_upgradeProgressBar;
     QLabel *m_upgradeStatusLabel;
     QPushButton *m_startUpgradeBtn;
@@ -124,11 +173,14 @@ private:
 
     // 4. 底部日志与统计控件
     QPlainTextEdit *m_consoleLog;
+    QComboBox *m_logFilterCombo;
+    QLineEdit *m_logSearchEdit;
     QLabel *m_testCountLabel;
     QLabel *m_passCountLabel;
     QLabel *m_failCountLabel;
     QPushButton *m_resetStatsBtn;
     QPushButton *m_clearLogBtn;
+    QVector<LogEntry> m_logEntries;
 
     // 状态统计变量
     int m_testCount;
