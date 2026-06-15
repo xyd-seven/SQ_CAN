@@ -29,13 +29,17 @@ SOURCES += \
         mainwindow.cpp \
     canthread.cpp \
     imuparser.cpp \
-    imuwidgets.cpp
+    imuwidgets.cpp \
+    udsclient.cpp \
+    udswidget.cpp
 
 HEADERS += \
         mainwindow.h \
     canthread.h \
     imuparser.h \
-    imuwidgets.h
+    imuwidgets.h \
+    udsclient.h \
+    udswidget.h
 
 FORMS += \
         mainwindow.ui

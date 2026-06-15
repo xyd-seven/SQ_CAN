@@ -24,6 +24,7 @@
 #include <QSettings>
 #include <QPlainTextEdit>
 #include <QLineEdit>
+#include "udswidget.h"
 
 
 namespace Ui {
@@ -141,6 +142,9 @@ private:
     QComboBox *cmbFormatCAN;
     QCheckBox *chkSaveRaw;
     QCheckBox *chkSaveParsedIMU;
+    QCheckBox *chkUdsMode;
+    QLineEdit *rawUdsDidEdit;
+    QLabel *lblRawUdsDid;
 
     QFile m_canFile;
     QTextStream m_canStream;
@@ -189,6 +193,7 @@ private slots:
 private:
     // 串口控制界面组件
     QWidget *serialTab;
+    UdsWidget *udsWidget;
     QSerialPort *m_serialPort;
     QByteArray m_serialBuffer;
     bool m_isWaitingForAck;

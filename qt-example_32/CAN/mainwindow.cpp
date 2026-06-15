@@ -26,6 +26,7 @@ MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
     ui(new Ui::MainWindow)
 {
+    udsWidget = nullptr;
     m_isWaitingForAck = false;
     for (int i = 0; i < 2; ++i) {
         m_canTimestampBaseValid[i] = false;
@@ -310,6 +311,10 @@ MainWindow::MainWindow(QWidget *parent) :
     setupSerialTab();
     mainTab->addTab(serialTab, QString::fromUtf8("串口控制"));
     
+    udsWidget = new UdsWidget(mainTab);
+    udsWidget->setCanThread(canthread);
+    mainTab->addTab(udsWidget, QString::fromUtf8("UDS诊断"));
+    
     setCentralWidget(mainTab);
     
     //  50ms UI 刷新定时
@@ -321,6 +326,19 @@ MainWindow::MainWindow(QWidget *parent) :
     flushTimer = new QTimer(this);
     connect(flushTimer, &QTimer::timeout, this, &MainWindow::onFlushTimeout);
     flushTimer->start(5000);
+
+    // 加载上次的 UDS 模式下发及 DID 设置
+    QSettings udsSettings("SQ_CAN_APP", "MainWindowUdsConfig");
+    bool savedUdsMode = udsSettings.value("chkUdsMode", false).toBool();
+    QString savedUdsDid = udsSettings.value("rawUdsDid", "F1A0").toString();
+    if (chkUdsMode) {
+        chkUdsMode->setChecked(savedUdsMode);
+        lblRawUdsDid->setVisible(savedUdsMode);
+        rawUdsDidEdit->setVisible(savedUdsMode);
+    }
+    if (rawUdsDidEdit) {
+        rawUdsDidEdit->setText(savedUdsDid);
+    }
 }
 
 static const int deviceType_index_arr[12] = {42,3,42,3,42,3,41,4,41,4,200,201};
@@ -328,6 +346,15 @@ static const int deviceType_index_arr[12] = {42,3,42,3,42,3,41,4,41,4,200,201};
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    // 保存 UDS 模式下发及 DID 设置
+    QSettings udsSettings("SQ_CAN_APP", "MainWindowUdsConfig");
+    if (chkUdsMode) {
+        udsSettings.setValue("chkUdsMode", chkUdsMode->isChecked());
+    }
+    if (rawUdsDidEdit) {
+        udsSettings.setValue("rawUdsDid", rawUdsDidEdit->text());
+    }
+
     canthread->stop();
     canthread->closeDevice();
     if (!canthread->wait(2000)) {
@@ -431,6 +458,12 @@ void MainWindow::canRecvedCANData(QVector<ZCAN_Receive_Data> recvCANData,UINT fr
         // 提取 ID
         UINT can_id = GET_ID(recvCANData[i].frame.can_id);
         
+        // 分发给 UDS 诊断模块
+        if (udsWidget && udsWidget->udsClient() && can_id == udsWidget->udsClient()->responseID()) {
+            QByteArray data((const char*)recvCANData[i].frame.data, recvCANData[i].frame.can_dlc);
+            udsWidget->udsClient()->handleIncomingFrame(can_id, data);
+        }
+        
         // 馈给姿传感器解析
         QString receiveTimeText = formatCANReceiveTime(recvCANData[i].timestamp, channel);
         qint64 receiveElapsedMs = getCANReceiveElapsedMs(recvCANData[i].timestamp, channel);
@@ -465,6 +498,12 @@ void MainWindow::canRecvedCANFDData(QVector<ZCAN_ReceiveFD_Data> recvCANFDData,U
     {
         // 提取 ID
         UINT can_id = GET_ID(recvCANFDData[i].frame.can_id);
+
+        // 分发给 UDS 诊断模块
+        if (udsWidget && udsWidget->udsClient() && can_id == udsWidget->udsClient()->responseID()) {
+            QByteArray data((const char*)recvCANFDData[i].frame.data, recvCANFDData[i].frame.len);
+            udsWidget->udsClient()->handleIncomingFrame(can_id, data);
+        }
 
         // 馈给姿传感器解析
         QString receiveTimeText = formatCANReceiveTime(recvCANFDData[i].timestamp, channel);
@@ -1685,6 +1724,24 @@ void MainWindow::setupRawTab()
     rawBtnSendCmd = new QPushButton(QString::fromUtf8("发送指令 (CAN)"), boxRawCmd);
     rawBtnSendCmd->setStyleSheet("QPushButton { background-color: #5e81ac; color: #eceff4; border-radius: 4px; padding: 6px 12px; font-weight: bold; } QPushButton:hover { background-color: #81a1c1; }");
 
+    chkUdsMode = new QCheckBox(QString::fromUtf8("启用 UDS 模式下发"), boxRawCmd);
+    chkUdsMode->setStyleSheet("QCheckBox { color: #eceff4; font-size: 13px; font-weight: bold; }");
+
+    lblRawUdsDid = new QLabel("DID:", boxRawCmd);
+    lblRawUdsDid->setStyleSheet(labelStyle);
+    lblRawUdsDid->hide();
+
+    rawUdsDidEdit = new QLineEdit("F1A0", boxRawCmd);
+    rawUdsDidEdit->setStyleSheet(editStyle);
+    rawUdsDidEdit->setFixedWidth(60);
+    rawUdsDidEdit->setMaxLength(4);
+    rawUdsDidEdit->hide();
+
+    connect(chkUdsMode, &QCheckBox::toggled, this, [this](bool checked){
+        lblRawUdsDid->setVisible(checked);
+        rawUdsDidEdit->setVisible(checked);
+    });
+
     QLabel *lblSendHex = new QLabel(QString::fromUtf8("发送HEX (下行):"), boxRawCmd); lblSendHex->setStyleSheet(labelStyle);
     rawEditSendHex = new QLineEdit(boxRawCmd);
     rawEditSendHex->setReadOnly(true);
@@ -1726,7 +1783,14 @@ void MainWindow::setupRawTab()
 
     layRawCmd->addWidget(lblCmd, 6, 0); layRawCmd->addWidget(rawCmbCmdType, 6, 1, 1, 3);
     layRawCmd->addWidget(rawEditCustomHexCmd, 7, 0, 1, 4);
-    layRawCmd->addWidget(rawBtnSendCmd, 8, 0, 1, 4);
+
+    QHBoxLayout *layBtnRow = new QHBoxLayout();
+    layBtnRow->addWidget(chkUdsMode);
+    layBtnRow->addWidget(lblRawUdsDid);
+    layBtnRow->addWidget(rawUdsDidEdit);
+    layBtnRow->addWidget(rawBtnSendCmd, 1);
+    layRawCmd->addLayout(layBtnRow, 8, 0, 1, 4);
+
     layRawCmd->addWidget(lblSendHex, 9, 0);
     layRawCmd->addWidget(rawEditSendHex, 9, 1, 1, 3);
 
@@ -3770,6 +3834,28 @@ void MainWindow::onSendRawCommand()
         formattedHex.append(hexStr.mid(i, 2) + " ");
     }
     rawEditSendHex->setText(formattedHex.trimmed());
+
+    // UDS 模式下发分支
+    if (chkUdsMode && chkUdsMode->isChecked()) {
+        if (!udsWidget || !udsWidget->udsClient()) {
+            QMessageBox::warning(this, "警告", "UDS 诊断模块尚未就绪！");
+            return;
+        }
+        bool okDid;
+        uint16_t did = rawUdsDidEdit->text().toUInt(&okDid, 16);
+        if (!okDid) {
+            QMessageBox::warning(this, "错误", "请输入有效的十六进制 DID 编码！");
+            return;
+        }
+        bool ok = udsWidget->udsClient()->writeDataByIdentifier(did, cmdBytes);
+        if (ok) {
+            lblRawStatus->setText(QString::fromUtf8("透传状态: UDS 写入成功"));
+            lblRawStatus->setStyleSheet("color: #2e3440; font-size: 13px; font-weight: bold; background-color: #a3be8c; padding: 6px 15px; border-radius: 4px;");
+        } else {
+            QMessageBox::warning(this, "警告", "UDS 写入请求发送失败，请确认设备连接已打开！");
+        }
+        return;
+    }
 
     // Segment into 5 frames (IDs: 0x11 ~ 0x15) and send
     bool allOk = true;
