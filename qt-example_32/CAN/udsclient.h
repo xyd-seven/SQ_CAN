@@ -59,11 +59,11 @@ private slots:
 
 private:
     // ISO-TP 发送辅助方法
-    void transmitIsoTpMessage(const QByteArray &message);
-    void sendSingleFrame(const QByteArray &payload);
-    void sendFirstFrame(const QByteArray &payload);
-    void sendConsecutiveFrame();
-    void sendFlowControl(uint8_t flowStatus, uint8_t blockSize, uint8_t stMin);
+    bool transmitIsoTpMessage(const QByteArray &message);
+    bool sendSingleFrame(const QByteArray &payload);
+    bool sendFirstFrame(const QByteArray &payload);
+    bool sendConsecutiveFrame();
+    bool sendFlowControl(uint8_t flowStatus, uint8_t blockSize, uint8_t stMin);
 
     // ISO-TP 接收辅助方法
     void processRxBuffer();
@@ -88,6 +88,7 @@ private:
     void runUpgradeStateMachine();
     void transitionUpgradeState(UpgradeState newState);
     uint32_t calculateKey(uint32_t seed);
+    void resetTransportState(bool clearUdsWait);
     int getMaxFrameSize() const;
     uint32_t calculateCrc32(const QByteArray &data) const;
 

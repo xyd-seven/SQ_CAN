@@ -759,7 +759,7 @@ void UdsWidget::onUdsResponseReceived(uint8_t serviceId, bool isPositive, const 
     // 组装十六进制显示
     QString hexStr;
     if (isPositive) {
-        hexStr += QString("%1 ").arg(serviceId + 0x40, 2, 16, QChar('0')).toUpper();
+        hexStr += QString("%1 ").arg(serviceId, 2, 16, QChar('0')).toUpper();
         for (int i = 0; i < payload.size(); ++i) {
             hexStr += QString("%1 ").arg(static_cast<uint8_t>(payload.at(i)), 2, 16, QChar('0')).toUpper();
         }
