@@ -97,25 +97,41 @@ void UdsWidget::setupUi()
     m_protocolCombo->setStyleSheet(getComboBoxStyleSheet());
     configLayout->addWidget(m_protocolCombo, 0, 3);
 
+    // 帧类型 (标准帧 / 扩展帧)
+    configLayout->addWidget(new QLabel(QString::fromUtf8("帧类型:"), this), 0, 4);
+    m_frameTypeCombo = new QComboBox(this);
+    m_frameTypeCombo->addItems(QStringList() << QString::fromUtf8("标准帧 (11-bit)") << QString::fromUtf8("扩展帧 (29-bit)"));
+    m_frameTypeCombo->setStyleSheet(getComboBoxStyleSheet());
+    configLayout->addWidget(m_frameTypeCombo, 0, 5);
+
+    QRegularExpression hexIdRegex("^[0-9a-fA-F]{1,8}$");
+    QRegularExpressionValidator *hexIdValidator = new QRegularExpressionValidator(hexIdRegex, this);
+
     // 请求 ID (Hex)
-    configLayout->addWidget(new QLabel(QString::fromUtf8("请求 ID:"), this), 0, 4);
+    configLayout->addWidget(new QLabel(QString::fromUtf8("请求 ID:"), this), 0, 6);
     m_reqIdEdit = new QLineEdit("7E0", this);
     m_reqIdEdit->setPlaceholderText("Hex");
+    m_reqIdEdit->setMaxLength(8);
+    m_reqIdEdit->setValidator(hexIdValidator);
     m_reqIdEdit->setStyleSheet(getLineEditStyleSheet());
-    configLayout->addWidget(m_reqIdEdit, 0, 5);
+    configLayout->addWidget(m_reqIdEdit, 0, 7);
 
     // 响应 ID (Hex)
-    configLayout->addWidget(new QLabel(QString::fromUtf8("响应 ID:"), this), 0, 6);
+    configLayout->addWidget(new QLabel(QString::fromUtf8("响应 ID:"), this), 0, 8);
     m_resIdEdit = new QLineEdit("7E8", this);
     m_resIdEdit->setPlaceholderText("Hex");
+    m_resIdEdit->setMaxLength(8);
+    m_resIdEdit->setValidator(hexIdValidator);
     m_resIdEdit->setStyleSheet(getLineEditStyleSheet());
-    configLayout->addWidget(m_resIdEdit, 0, 7);
+    configLayout->addWidget(m_resIdEdit, 0, 9);
 
     // 功能寻址 ID (Hex)
-    configLayout->addWidget(new QLabel(QString::fromUtf8("功能 ID:"), this), 0, 8);
+    configLayout->addWidget(new QLabel(QString::fromUtf8("功能 ID:"), this), 0, 10);
     m_funcIdEdit = new QLineEdit("7DF", this);
+    m_funcIdEdit->setMaxLength(8);
+    m_funcIdEdit->setValidator(hexIdValidator);
     m_funcIdEdit->setStyleSheet(getLineEditStyleSheet());
-    configLayout->addWidget(m_funcIdEdit, 0, 9);
+    configLayout->addWidget(m_funcIdEdit, 0, 11);
 
     // Tester Present 保持心跳配置
     m_testerPresentCheck = new QCheckBox(QString::fromUtf8("启用 3E 心跳"), this);
@@ -576,6 +592,7 @@ void UdsWidget::setupUi()
     // ------------------ 信号连接绑定 ------------------
     connect(m_channelCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &UdsWidget::onApplyConfig);
     connect(m_protocolCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &UdsWidget::onApplyConfig);
+    connect(m_frameTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &UdsWidget::onApplyConfig);
     connect(m_reqIdEdit, &QLineEdit::editingFinished, this, &UdsWidget::onApplyConfig);
     connect(m_resIdEdit, &QLineEdit::editingFinished, this, &UdsWidget::onApplyConfig);
     connect(m_funcIdEdit, &QLineEdit::editingFinished, this, &UdsWidget::onApplyConfig);
@@ -906,8 +923,31 @@ void UdsWidget::onApplyConfig()
 
     int channel = m_channelCombo->currentIndex();
     int protocol = m_protocolCombo->currentIndex(); // 0-CAN, 1-CANFD
+    bool isExtended = (m_frameTypeCombo->currentIndex() == 1);
 
-    m_udsClient->setConfig(reqId, resId, false, channel, protocol);
+    // 智能容错与边界检查：
+    // 1. 如果用户输入了大于 0x7FF 的 ID 但当前为标准帧模式，自动切换为扩展帧
+    if (!isExtended && (reqId > 0x7FF || resId > 0x7FF)) {
+        isExtended = true;
+        m_frameTypeCombo->blockSignals(true);
+        m_frameTypeCombo->setCurrentIndex(1);
+        m_frameTypeCombo->blockSignals(false);
+        onLogMessage(QString("ID超出标准帧范围(0~0x7FF)，已自动切换为扩展帧模式(29-bit)"), 1);
+    }
+
+    // 2. 检查扩展帧是否超出 29 位有效范围 (0~0x1FFFFFFF)
+    if (isExtended) {
+        if (reqId > 0x1FFFFFFF) {
+            onLogMessage(QString("请求 ID 0x%1 超出 29 位扩展帧范围(0~0x1FFFFFFF)").arg(reqId, 0, 16).toUpper(), 3);
+            return;
+        }
+        if (resId > 0x1FFFFFFF) {
+            onLogMessage(QString("响应 ID 0x%1 超出 29 位扩展帧范围(0~0x1FFFFFFF)").arg(resId, 0, 16).toUpper(), 3);
+            return;
+        }
+    }
+
+    m_udsClient->setConfig(reqId, resId, isExtended, channel, protocol);
     saveSettings();
 }
 
@@ -1769,6 +1809,7 @@ void UdsWidget::onStartUpgradeClicked()
     setUpgradeConfigControlsEnabled(false);
     m_channelCombo->setEnabled(false);
     m_protocolCombo->setEnabled(false);
+    m_frameTypeCombo->setEnabled(false);
     m_reqIdEdit->setEnabled(false);
     m_resIdEdit->setEnabled(false);
     m_funcIdEdit->setEnabled(false);
@@ -1824,6 +1865,7 @@ void UdsWidget::onUpgradeCompleted(bool success, const QString &errorMsg)
     setUpgradeConfigControlsEnabled(true);
     m_channelCombo->setEnabled(true);
     m_protocolCombo->setEnabled(true);
+    m_frameTypeCombo->setEnabled(true);
     m_reqIdEdit->setEnabled(true);
     m_resIdEdit->setEnabled(true);
     m_funcIdEdit->setEnabled(true);
@@ -1960,6 +2002,7 @@ void UdsWidget::loadSettings()
     QSettings settings("SQ_CAN_APP", "UdsConfig");
     m_channelCombo->setCurrentIndex(settings.value("channel", 0).toInt());
     m_protocolCombo->setCurrentIndex(settings.value("protocol", 0).toInt());
+    m_frameTypeCombo->setCurrentIndex(settings.value("frameType", 0).toInt());
     m_reqIdEdit->setText(settings.value("reqId", "7E0").toString());
     m_resIdEdit->setText(settings.value("resId", "7E8").toString());
     m_funcIdEdit->setText(settings.value("funcId", "7DF").toString());
@@ -1973,6 +2016,7 @@ void UdsWidget::saveSettings()
     QSettings settings("SQ_CAN_APP", "UdsConfig");
     settings.setValue("channel", m_channelCombo->currentIndex());
     settings.setValue("protocol", m_protocolCombo->currentIndex());
+    settings.setValue("frameType", m_frameTypeCombo->currentIndex());
     settings.setValue("reqId", m_reqIdEdit->text());
     settings.setValue("resId", m_resIdEdit->text());
     settings.setValue("funcId", m_funcIdEdit->text());

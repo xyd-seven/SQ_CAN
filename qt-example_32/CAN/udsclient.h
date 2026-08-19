@@ -33,6 +33,7 @@ public:
     
     uint32_t requestID() const { return m_requestID; }
     uint32_t responseID() const { return m_responseID; }
+    bool isExtended() const { return m_isExtended; }
     bool isRunning() const { return m_canThread != nullptr; }
 
     // 主动控制接口

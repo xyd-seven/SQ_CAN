@@ -110,6 +110,7 @@ private:
     // 1. 顶部配置控件
     QComboBox *m_channelCombo;
     QComboBox *m_protocolCombo;
+    QComboBox *m_frameTypeCombo;
     QLineEdit *m_reqIdEdit;
     QLineEdit *m_funcIdEdit;
     QLineEdit *m_resIdEdit;

@@ -461,8 +461,10 @@ void MainWindow::canRecvedCANData(QVector<ZCAN_Receive_Data> recvCANData,UINT fr
         // 提取 ID
         UINT can_id = GET_ID(recvCANData[i].frame.can_id);
         
-        // 分发给 UDS 诊断模块
-        if (udsWidget && udsWidget->udsClient() && can_id == udsWidget->udsClient()->responseID()) {
+        // 分发给 UDS 诊断模块 (严格匹配 ID 和 帧格式 标准/扩展)
+        if (udsWidget && udsWidget->udsClient() 
+            && can_id == udsWidget->udsClient()->responseID()
+            && (IS_EFF(recvCANData[i].frame.can_id) == (udsWidget->udsClient()->isExtended() ? 1 : 0))) {
             QByteArray data((const char*)recvCANData[i].frame.data, recvCANData[i].frame.can_dlc);
             udsWidget->udsClient()->handleIncomingFrame(can_id, data);
         }
@@ -553,8 +555,10 @@ void MainWindow::canRecvedCANFDData(QVector<ZCAN_ReceiveFD_Data> recvCANFDData,U
         // 提取 ID
         UINT can_id = GET_ID(recvCANFDData[i].frame.can_id);
 
-        // 分发给 UDS 诊断模块
-        if (udsWidget && udsWidget->udsClient() && can_id == udsWidget->udsClient()->responseID()) {
+        // 分发给 UDS 诊断模块 (严格匹配 ID 和 帧格式 标准/扩展)
+        if (udsWidget && udsWidget->udsClient() 
+            && can_id == udsWidget->udsClient()->responseID()
+            && (IS_EFF(recvCANFDData[i].frame.can_id) == (udsWidget->udsClient()->isExtended() ? 1 : 0))) {
             QByteArray data((const char*)recvCANFDData[i].frame.data, recvCANFDData[i].frame.len);
             udsWidget->udsClient()->handleIncomingFrame(can_id, data);
         }
