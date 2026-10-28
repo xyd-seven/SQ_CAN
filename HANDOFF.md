@@ -6,6 +6,19 @@
 
 ## 2. 当前状态
 
+- [x] 已完成：增加 `USBCANFD-100U-mini` 设备入口，映射周立功设备类型 `ZCAN_USBCANFD_MINI (43)`。
+- [x] 已完成：CAN 线程支持单通道设备，避免初始化、配置、启动、复位、接收和发送时访问不存在的第二通道。
+- [x] 已完成：部署 32 位 `kerneldlls` 运行时目录，包含 `USBCANFD.dll` 及其 SDK 依赖。
+- [x] 已完成：为 MinGW 32-bit 生成 `libzlgcan_mingw.a` 导入库，解决 SDK `zlgcan.lib` 的 MSVC/MinGW 链接格式差异。
+- [x] 已完成：修正 MinGW 导入库中的 stdcall 导出名，匹配 `zlgcan.dll` 的 `_GetIProperty@4` 等实际导出，避免程序启动时入口点错误。
+- [x] 已完成：程序启动时切换工作目录到 exe 所在目录，确保 `kerneldlls` 能被 `zlgcan.dll` 找到。
+- [x] 已完成：`USBCANFD-100U-mini` 打开设备时兼容尝试 SDK 类型 43 和 42，适配不同 SDK/固件版本的型号标识。
+- [x] 已完成：设备打开失败时显示设备类型、索引、工作目录、驱动文件状态和 `GetLastError`，便于区分设备占用与驱动加载问题。
+- [x] 已确认：`USBCANFD.dll` 依赖 32 位 `MSVCR120.dll`、`MSVCP120.dll`，目标电脑需安装 Visual C++ 2013 x86 运行库。
+- [x] 已完成：调用 `ZCAN_OpenDevice` 前显式加入 `kerneldlls` 到 Windows DLL 搜索路径，避免驱动依赖 DLL 因搜索路径导致加载失败。
+- [x] 已完成：采用 `E:\ZCANPRO` 的新版 `zlgcan.dll`、`USBCANFD.dll` 和配置，并按无修饰 DLL 导出名重新生成 MinGW 导入库。
+- [x] 已验证：最小诊断程序使用 `ZCAN_OpenDevice(43, 0, 0)` 成功返回有效设备句柄。
+
 - [x] 已完成：车姿监控 2D 姿态图轴向映射设置，支持 X/Y/Z 正负轴配置并持久化。
 - [x] 已完成：轴向映射同步作用于车姿监控、IMU 数据透传、串口控制三个 tab 的 2D 图。
 - [x] 已完成：车姿监控解析数据保存为 CSV，时间戳保留毫秒，缺失协议字段填 0。
@@ -102,6 +115,10 @@ P2：
 6. 复查透传/串口指令下发默认参数：确认默认值是真实 text 或读取空值时有协议默认值。
 
 ## 8. 测试状态
+
+- PASS：使用 Qt 5.15.2 MinGW 32-bit qmake 和 mingw32-make 编译通过。
+- PASS：`USBCANFD-100U-mini` 设备类型 43 及单通道保护逻辑通过编译检查。
+- UNKNOWN：尚未连接实物验证设备打开、CAN-FD 收发和 UDS 流程。
 
 - PASS：qmake + mingw32-make 编译通过。
 - PASS：CAN 收发控制页滚动冻结修改已编译通过。

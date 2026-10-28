@@ -78,7 +78,8 @@ MainWindow::MainWindow(QWidget *parent) :
     QStringList ss = {
         "ZQWL-UCANFD-100C", "ZQWL-UCAN-101C", "ZQWL-UCANFD-100K", "ZQWL-UCAN-101K",
         "ZQWL-UCANFD-100E", "ZQWL-UCAN-101E", "ZQWL-UCANFD-200U", "ZQWL-UCAN-201U",
-        "ZQWL-UCANFD-200C", "ZQWL-UCAN-201C", "ZQWL-UCAN-401U", "ZQWL-UCANFD-400U"
+        "ZQWL-UCANFD-200C", "ZQWL-UCAN-201C", "ZQWL-UCAN-401U", "ZQWL-UCANFD-400U",
+        "USBCANFD-100U-mini"
     };
 
     ui->deviceTypeCombo->clear();
@@ -344,7 +345,22 @@ MainWindow::MainWindow(QWidget *parent) :
     }
 }
 
-static const int deviceType_index_arr[12] = {42,3,42,3,42,3,41,4,41,4,200,201};
+static const int deviceType_index_arr[13] = {42,3,42,3,42,3,41,4,41,4,200,201,43};
+static const int deviceChannel_count_arr[13] = {2,2,2,2,2,2,2,2,2,2,2,2,1};
+
+static bool openSelectedDevice(CANThread *thread, UINT deviceType, UINT deviceIndex)
+{
+    if (thread->openDevice(deviceType, deviceIndex, 0))
+        return true;
+
+    // Different ZLG SDK/firmware revisions identify USBCANFD-100U-mini as
+    // either USBCANFD_MINI (43) or USBCANFD_100U (42).
+    if (deviceType == 43) {
+        qWarning() << "USBCANFD_MINI (43) open failed, retrying USBCANFD_100U (42)";
+        return thread->openDevice(42, deviceIndex, 0);
+    }
+    return false;
+}
 
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -651,14 +667,19 @@ void MainWindow::on_cleanListBtn_clicked()
 void MainWindow::on_openDeviceBtn_clicked()
 {
     //1.打开设
-    if(canthread->openDevice(deviceType_index_arr[ui->deviceTypeCombo->currentIndex()],ui->deviceIndexCombo->currentIndex(),0))
+    const int deviceIndex = ui->deviceTypeCombo->currentIndex();
+    canthread->setChannelCount(deviceChannel_count_arr[deviceIndex]);
+    if(openSelectedDevice(canthread, deviceType_index_arr[deviceIndex], ui->deviceIndexCombo->currentIndex()))
     {
+        ui->sendPathCombo->setEnabled(deviceChannel_count_arr[deviceIndex] > 1);
+        if (deviceChannel_count_arr[deviceIndex] == 1)
+            ui->sendPathCombo->setCurrentIndex(0);
         ui->openDeviceBtn->setEnabled(false);
         ui->initCANBtn->setEnabled(true);
         ui->closeDeviceBtn->setEnabled(true);
     }
     else
-        QMessageBox::warning(this,"警告","设打失败");
+        QMessageBox::warning(this, "警告", QString("设备打开失败\n%1").arg(canthread->lastOpenError()));
 }
 
 void MainWindow::on_initCANBtn_clicked()
@@ -748,6 +769,7 @@ void MainWindow::on_closeDeviceBtn_clicked()
     ui->reSetCANBtn->setEnabled(false);
     ui->closeDeviceBtn->setEnabled(false);
     ui->sendBtn->setEnabled(false);
+    ui->sendPathCombo->setEnabled(true);
     ui->openDeviceBtn->setEnabled(true);
 
     btnQuickStart->setEnabled(true);
@@ -2399,12 +2421,17 @@ void MainWindow::onSaveRawStateChanged(int state)
 void MainWindow::onQuickStartClicked()
 {
     // 步骤1：打开设备
-    if (!canthread->openDevice(deviceType_index_arr[ui->deviceTypeCombo->currentIndex()],
-                               ui->deviceIndexCombo->currentIndex(), 0)) {
+    const int deviceIndex = ui->deviceTypeCombo->currentIndex();
+    canthread->setChannelCount(deviceChannel_count_arr[deviceIndex]);
+    if (!openSelectedDevice(canthread, deviceType_index_arr[deviceIndex],
+                            ui->deviceIndexCombo->currentIndex())) {
         QMessageBox::warning(this, QString::fromUtf8("一键启动失败"),
-                             QString::fromUtf8("\xe7\xac\xac" "1" "\xe6\xad\xa5" " [" "\xe6\x89\x93\xe5\xbc\x80\xe8\xae\xbe\xe5\xa4\x87" "] " "\xe5\xa4\xb1\xe8\xb4\xa5" "\n" "\xe8\xaf\xb7\xe6\xa3\x80\xe6\x9f\xa5\xe8\xae\xbe\xe5\xa4\x87\xe7\xb1\xbb\xe5\x9e\x8b\xe5\x92\x8c" "USB" "\xe8\xbf\x9e\xe6\x8e\xa5"));
+                             QString::fromUtf8("\xe7\xac\xac" "1" "\xe6\xad\xa5" " [" "\xe6\x89\x93\xe5\xbc\x80\xe8\xae\xbe\xe5\xa4\x87" "] " "\xe5\xa4\xb1\xe8\xb4\xa5" "\n" "\xe8\xaf\xb7\xe6\xa3\x80\xe6\x9f\xa5\xe8\xae\xbe\xe5\xa4\x87\xe7\xb1\xbb\xe5\x9e\x8b\xe5\x92\x8c" "USB" "\xe8\xbf\x9e\xe6\x8e\xa5" "\n") + canthread->lastOpenError());
         return;
     }
+    ui->sendPathCombo->setEnabled(deviceChannel_count_arr[deviceIndex] > 1);
+    if (deviceChannel_count_arr[deviceIndex] == 1)
+        ui->sendPathCombo->setCurrentIndex(0);
     ui->openDeviceBtn->setEnabled(false);
     ui->closeDeviceBtn->setEnabled(true);
 

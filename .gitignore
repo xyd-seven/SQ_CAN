@@ -80,3 +80,9 @@ qt-example_32/CAN/CAN_resource.rc
 # Local backup files
 qt-example_32/CAN/* old.dll
 qt-example_32/CAN/* old.h
+
+# Local build, packages, SDK materials and diagnostics
+/build_*/
+/dist_*/
+/tmp/
+/开发资料/

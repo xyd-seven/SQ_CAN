@@ -55,13 +55,14 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
 #dll¿âÒýÓÃ£¿ 1024²Â
-win32: LIBS += -L$$PWD/./ -l zlgcan
+win32:!win32-g++: LIBS += -L$$PWD/./ -l zlgcan
+win32-g++: LIBS += -L$$PWD/./ -l zlgcan_mingw
 
 INCLUDEPATH += $$PWD/.
 DEPENDPATH += $$PWD/.
 
 win32:!win32-g++: PRE_TARGETDEPS += $$PWD/./zlgcan.lib
-#else:win32-g++: PRE_TARGETDEPS += $$PWD/./libControlCANFD.a
+win32-g++: PRE_TARGETDEPS += $$PWD/./libzlgcan_mingw.a
 
 # 强制编译器以 UTF-8 处理源文件和执行字符集，彻底解决中文字符乱码
 win32-g++ {

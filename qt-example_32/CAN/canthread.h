@@ -18,6 +18,10 @@ public:
 
     //1.打开设备
     bool openDevice(UINT device_type, UINT device_index, UINT reserved);
+    QString lastOpenError() const;
+
+    // 设置设备通道数量。USBCANFD-MINI 等设备只有一个通道。
+    void setChannelCount(UINT count);
 
     //2.设置CANFD标准
     bool setCANFDStandard(UINT standard);
@@ -56,6 +60,8 @@ public:
     DEVICE_HANDLE m_dev;
     CHANNEL_HANDLE m_channel1;
     CHANNEL_HANDLE m_channel2;
+    UINT m_channelCount;
+    QString m_lastOpenError;
     IProperty* devPtr;
     ZCAN_CHANNEL_INIT_CONFIG m_config;
 //    bool m_isSetValue;
